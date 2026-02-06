@@ -657,29 +657,9 @@ if not ohtml:
         ohtml = "<tr><td colspan='7' class='muted'>No hay pedidos</td></tr>"
 
 body = f"""
-    <div class="card">
-      <div class="row">
-        <a class="btn" href="/">🏠 Inicio</a>
-        <a class="btn" href="/logout">🚪 Salir</a>
-      </div>
-      <div style="height:10px;"></div>
-      <div class="muted">Tu Telegram ID</div>
-      <div class="kpi">{uid}</div>
-    </div>
-
-    <h3 style="margin:12px 0 0 0;">📦 Mis proxies</h3>
-    {phtml}
-
-    <h3 style="margin:18px 0 0 0;">📨 Mis pedidos</h3>
-    <div class="card">
-      <table>
-        <tr><th>ID</th><th>Tipo</th><th>IP</th><th>Qty</th><th>Monto</th><th>Estado</th><th>Creado</th></tr>
-        {ohtml}
-      </table>
-    </div>
     """
-    
-return page("Panel Cliente", body)
+
+    return page("Panel Cliente", body)
 
 
 # =========================
@@ -691,6 +671,7 @@ def api_maintenance():
     enabled = get_setting("maintenance_enabled", "0") == "1"
     msg = get_setting("maintenance_message", "")
     return {"enabled": enabled, "message": msg}
+
 
 
 # =========================
@@ -706,6 +687,7 @@ def api_outbox(admin=Depends(require_admin)):
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return {"enabled": True, "items": rows}
+
 
 
 
