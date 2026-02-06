@@ -656,7 +656,7 @@ for r in orders_rows:
 if not ohtml:
         ohtml = "<tr><td colspan='7' class='muted'>No hay pedidos</td></tr>"
 
-    body = f"""
+body = f"""
     <div class="card">
       <div class="row">
         <a class="btn" href="/">🏠 Inicio</a>
@@ -705,6 +705,7 @@ def api_outbox(admin=Depends(require_admin)):
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return {"enabled": True, "items": rows}
+
 
 
 
