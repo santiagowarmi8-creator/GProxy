@@ -651,7 +651,7 @@ if not phtml:
         phtml = "<div class='card'><p class='muted'>No tienes proxies todavía.</p></div>"
 
 ohtml = ""
-    for r in orders_rows:
+for r in orders_rows:
         ohtml += f"<tr><td>#{r['id']}</td><td>{r['tipo']}</td><td>{r['ip'] or '-'}</td><td>{r['cantidad']}</td><td>{r['monto']}</td><td>{r['estado']}</td><td>{r['created_at']}</td></tr>"
 if not ohtml:
         ohtml = "<tr><td colspan='7' class='muted'>No hay pedidos</td></tr>"
@@ -705,6 +705,7 @@ def api_outbox(admin=Depends(require_admin)):
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return {"enabled": True, "items": rows}
+
 
 
 
