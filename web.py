@@ -5,9 +5,6 @@
 # - Panel admin básico + mantenimiento ON/OFF + mensaje personalizado
 # - Opcional: crea una "outbox" para que el BOT mande broadcast (mantenimiento on/off)
 
-from fastapi import FastAPI
-app = FastAPI()
-
 import os
 import time
 import json
@@ -15,9 +12,9 @@ import hmac
 import base64
 import hashlib
 import sqlite3
-from typing import Optional, Dict, Any, List
+from typing import Dict, Any
 
-from fastapi import FastAPI, Depends, HTTPException, Request, Response, Form
+from fastapi import FastAPI, Depends, HTTPException, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 # =========================
@@ -25,8 +22,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 # =========================
 DB_PATH = os.getenv("DB_PATH", "data.db")
 
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")          # EJ: "MiClaveSuperFuerte"
-JWT_SECRET = os.getenv("JWT_SECRET", "change_me_admin")   # secreto largo random
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")              # EJ: "MiClaveSuperFuerte"
+JWT_SECRET = os.getenv("JWT_SECRET", "change_me_admin")       # secreto largo random
 CLIENT_SECRET = os.getenv("CLIENT_SECRET", "change_me_client")  # secreto largo random
 
 APP_TITLE = os.getenv("APP_TITLE", "Gproxy Panel")
@@ -36,7 +33,6 @@ APP_TITLE = os.getenv("APP_TITLE", "Gproxy Panel")
 # - En su lugar, guarda un "mensaje pendiente" en outbox.
 # - El bot.py puede leer esa tabla cada X segundos/minutos y enviar a todos.
 ENABLE_OUTBOX = os.getenv("ENABLE_OUTBOX", "1").strip() == "1"
-
 
 # =========================
 # APP
@@ -61,7 +57,7 @@ def ensure_web_schema():
     conn = db()
     cur = conn.cursor()
 
-    # Tabla para mantenimiento (1 fila)
+    # Tabla settings
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS settings(
@@ -72,27 +68,29 @@ def ensure_web_schema():
         """
     )
 
-    # Outbox opcional (para que el bot haga broadcast)
+    # Outbox opcional
     if ENABLE_OUTBOX:
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS outbox(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                kind TEXT NOT NULL,            -- "maintenance_on" / "maintenance_off" / etc
+                kind TEXT NOT NULL,
                 message TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                sent_at TEXT NOT NULL DEFAULT ''  -- se llena cuando el bot lo procese
+                sent_at TEXT NOT NULL DEFAULT ''
             )
             """
         )
 
     # Defaults
-    # maintenance_enabled: "0" / "1"
-    cur.execute("INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES(?,?,?)",
-                ("maintenance_enabled", "0", now_str()))
-    # maintenance_message: texto
-    cur.execute("INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES(?,?,?)",
-                ("maintenance_message", "⚠️ Estamos en mantenimiento. Vuelve en unos minutos.", now_str()))
+    cur.execute(
+        "INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES(?,?,?)",
+        ("maintenance_enabled", "0", now_str()),
+    )
+    cur.execute(
+        "INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES(?,?,?)",
+        ("maintenance_message", "⚠️ Estamos en mantenimiento. Vuelve en unos minutos.", now_str()),
+    )
 
     conn.commit()
     conn.close()
@@ -193,19 +191,23 @@ def require_client(request: Request) -> Dict[str, Any]:
 # =========================
 # UI helpers (HTML)
 # =========================
+def html_escape(s: str) -> str:
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def page(title: str, body: str) -> str:
     return f"""<!doctype html>
 <html lang="es">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{title}</title>
+  <title>{html_escape(title)}</title>
   <style>
     body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 0; background:#0b0f17; color:#e8eefc; }}
     .wrap {{ max-width: 980px; margin: 0 auto; padding: 24px; }}
     .card {{ background:#121a2a; border:1px solid #22304d; border-radius:14px; padding:16px; margin: 14px 0; }}
     .row {{ display:flex; gap:12px; flex-wrap:wrap; }}
-    .btn {{ display:inline-block; padding:10px 14px; border-radius:10px; border:1px solid #2b3a5a; background:#18233a; color:#e8eefc; text-decoration:none; }}
+    .btn {{ display:inline-block; padding:10px 14px; border-radius:10px; border:1px solid #2b3a5a; background:#18233a; color:#e8eefc; text-decoration:none; cursor:pointer; }}
     .btn:hover {{ background:#1d2a44; }}
     input, textarea {{ width:100%; padding:10px; border-radius:10px; border:1px solid #2b3a5a; background:#0e1524; color:#e8eefc; }}
     textarea {{ min-height: 110px; }}
@@ -213,12 +215,13 @@ def page(title: str, body: str) -> str:
     .kpi {{ font-size:26px; font-weight:700; }}
     table {{ width:100%; border-collapse: collapse; }}
     td, th {{ border-bottom:1px solid #22304d; padding:10px; text-align:left; }}
-    code, pre {{ background:#0e1524; padding:6px 8px; border-radius:10px; border:1px solid #22304d; overflow:auto; }}
+    pre {{ white-space: pre-wrap; word-break: break-word; }}
+    code, pre {{ background:#0e1524; padding:10px; border-radius:10px; border:1px solid #22304d; overflow:auto; display:block; }}
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h2 style="margin:0 0 10px 0;">{title}</h2>
+    <h2 style="margin:0 0 10px 0;">{html_escape(title)}</h2>
     {body}
     <div class="muted" style="margin-top:20px;">Gproxy Web • Railway</div>
   </div>
@@ -237,7 +240,7 @@ def home():
     <div class="card">
       <div class="muted">Estado</div>
       <div class="kpi">{'🟠 Mantenimiento' if maint else '🟢 Online'}</div>
-      <p class="muted">{mtxt if maint else 'Todo funcionando.'}</p>
+      <p class="muted">{html_escape(mtxt) if maint else 'Todo funcionando.'}</p>
     </div>
 
     <div class="card">
@@ -288,6 +291,7 @@ def admin_login(password: str = Form(...)):
 
     token = sign({"role": "admin"}, JWT_SECRET, exp_seconds=8 * 3600)
     resp = RedirectResponse(url="/admin", status_code=302)
+    # Railway usa HTTPS => secure=True ok. Para pruebas local http, pon secure=False.
     resp.set_cookie("admin_session", token, httponly=True, secure=True, samesite="lax")
     return resp
 
@@ -307,7 +311,6 @@ def admin_dashboard(admin=Depends(require_admin)):
     conn = db()
     cur = conn.cursor()
 
-    # Tablas base (de tu bot.py)
     def count(sql: str) -> int:
         try:
             cur.execute(sql)
@@ -355,7 +358,7 @@ def admin_dashboard(admin=Depends(require_admin)):
     <div class="card">
       <div class="muted">Mantenimiento</div>
       <div class="kpi">{'🟠 ON' if maint else '🟢 OFF'}</div>
-      <p class="muted">{mtxt}</p>
+      <p class="muted">{html_escape(mtxt)}</p>
     </div>
     """
     return page("Admin Dashboard", body)
@@ -389,16 +392,23 @@ def admin_users(admin=Depends(require_admin), q: str = ""):
     trs = ""
     for r in rows:
         uid = r["user_id"]
-        uname = r["username"] or "-"
+        uname = (r["username"] or "-")
         blocked = "🚫" if int(r["is_blocked"] or 0) == 1 else "✅"
         last_seen = r["last_seen"] or "-"
-        trs += f"<tr><td>{blocked}</td><td><a class='btn' href='/admin/user/{uid}'>👤 {uid}</a></td><td>@{uname}</td><td>{last_seen}</td></tr>"
+        trs += (
+            "<tr>"
+            f"<td>{blocked}</td>"
+            f"<td><a class='btn' href='/admin/user/{uid}'>👤 {uid}</a></td>"
+            f"<td>@{html_escape(uname)}</td>"
+            f"<td>{html_escape(last_seen)}</td>"
+            "</tr>"
+        )
 
     body = f"""
     <div class="card">
       <form method="get" action="/admin/users">
         <label class="muted">Buscar (id o username)</label>
-        <input name="q" value="{q or ''}" placeholder="Ej: 1915349159 o yudith" />
+        <input name="q" value="{html_escape(q or '')}" placeholder="Ej: 1915349159 o yudith" />
         <div style="height:10px;"></div>
         <button class="btn" type="submit">Buscar</button>
         <a class="btn" href="/admin">⬅️ Dashboard</a>
@@ -460,13 +470,23 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
 
     phtml = ""
     for r in proxies_rows:
-        phtml += f"<tr><td>{r['id']}</td><td>{r['ip']}</td><td>{r['vence']}</td><td>{r['estado']}</td></tr>"
+        phtml += f"<tr><td>{r['id']}</td><td>{html_escape(r['ip'] or '')}</td><td>{html_escape(r['vence'] or '')}</td><td>{html_escape(r['estado'] or '')}</td></tr>"
     if not phtml:
         phtml = "<tr><td colspan='4' class='muted'>Sin proxies</td></tr>"
 
     ohtml = ""
     for r in req_rows:
-        ohtml += f"<tr><td>#{r['id']}</td><td>{r['tipo']}</td><td>{r['ip'] or '-'}</td><td>{r['cantidad']}</td><td>{r['monto']}</td><td>{r['estado']}</td><td>{r['created_at']}</td></tr>"
+        ohtml += (
+            "<tr>"
+            f"<td>#{r['id']}</td>"
+            f"<td>{html_escape(r['tipo'] or '')}</td>"
+            f"<td>{html_escape(r['ip'] or '-')}</td>"
+            f"<td>{r['cantidad']}</td>"
+            f"<td>{r['monto']}</td>"
+            f"<td>{html_escape(r['estado'] or '')}</td>"
+            f"<td>{html_escape(r['created_at'] or '')}</td>"
+            "</tr>"
+        )
     if not ohtml:
         ohtml = "<tr><td colspan='7' class='muted'>Sin pedidos</td></tr>"
 
@@ -479,8 +499,8 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
       <div style="height:10px;"></div>
       <div class="muted">Usuario</div>
       <div class="kpi">{user_id}</div>
-      <p class="muted">@{uname} • {tag}</p>
-      <p class="muted">Creado: {u['created_at'] or '-'} • Last seen: {u['last_seen'] or '-'}</p>
+      <p class="muted">@{html_escape(uname)} • {tag}</p>
+      <p class="muted">Creado: {html_escape(u['created_at'] or '-')} • Last seen: {html_escape(u['last_seen'] or '-')}</p>
     </div>
 
     <div class="card">
@@ -523,7 +543,7 @@ def admin_maintenance_page(admin=Depends(require_admin)):
       <div style="height:10px;"></div>
       <form method="post" action="/admin/maintenance">
         <label class="muted">Mensaje para clientes (se enviará cuando actives y cuando desactives)</label>
-        <textarea name="message" placeholder="Ej: Estamos mejorando el sistema. Volvemos pronto.">{msg}</textarea>
+        <textarea name="message" placeholder="Ej: Estamos mejorando el sistema. Volvemos pronto.">{html_escape(msg)}</textarea>
 
         <div style="height:12px;"></div>
         <div class="row">
@@ -551,7 +571,6 @@ def admin_maintenance_set(
 
     if action == "on":
         set_setting("maintenance_enabled", "1")
-        # outbox para bot: aviso global
         outbox_add("maintenance_on", msg)
         return RedirectResponse(url="/admin/maintenance", status_code=302)
 
@@ -588,7 +607,6 @@ def client_magic_login(token: str):
     if payload.get("role") != "client":
         raise HTTPException(401, "No autorizado")
 
-    # cookie de sesión cliente por 7 días
     session = sign({"role": "client", "uid": int(payload["uid"])}, CLIENT_SECRET, exp_seconds=7 * 24 * 3600)
     resp = RedirectResponse(url="/me", status_code=302)
     resp.set_cookie("client_session", session, httponly=True, secure=True, samesite="lax")
@@ -609,16 +627,15 @@ def client_me(client=Depends(require_client)):
     conn = db()
     cur = conn.cursor()
 
-    # Traer proxies
     proxies_rows = []
+    orders_rows = []
+
     try:
         cur.execute("SELECT id, ip, inicio, vence, estado, raw FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 50", (uid,))
         proxies_rows = cur.fetchall()
     except Exception:
         proxies_rows = []
 
-    # Traer pedidos
-    orders_rows = []
     try:
         cur.execute(
             "SELECT id, tipo, ip, cantidad, monto, estado, created_at FROM requests WHERE user_id=? ORDER BY id DESC LIMIT 50",
@@ -630,35 +647,70 @@ def client_me(client=Depends(require_client)):
 
     conn.close()
 
+    # ---- Proxies cards ----
     phtml = ""
     for r in proxies_rows:
         raw = (r["raw"] or "").strip()
         if raw and not raw.upper().startswith("HTTP"):
             raw = "HTTP\n" + raw
-        proxy_text = raw or "HTTP\n" + (r['ip'] or "")
-raw_block = f"<pre>{proxy_text}</pre>"
-phtml += f"""
+        proxy_text = raw or ("HTTP\n" + (r["ip"] or ""))
+
+        raw_block = f"<pre>{html_escape(proxy_text)}</pre>"
+
+        phtml += f"""
         <div class="card">
-          <div class="muted">Proxy ID {r['id']} • {r['estado']}</div>
+          <div class="muted">Proxy ID {r['id']} • {html_escape(r['estado'] or '')}</div>
           <div style="height:6px;"></div>
-          <div><b>{r['ip']}</b></div>
-          <div class="muted">Inicio: {r['inicio']} • Vence: {r['vence']}</div>
+          <div><b>{html_escape(r['ip'] or '')}</b></div>
+          <div class="muted">Inicio: {html_escape(r['inicio'] or '')} • Vence: {html_escape(r['vence'] or '')}</div>
           <div style="height:8px;"></div>
           {raw_block}
         </div>
         """
-if not phtml:
+
+    if not phtml:
         phtml = "<div class='card'><p class='muted'>No tienes proxies todavía.</p></div>"
 
-ohtml = ""
-for r in orders_rows:
-        ohtml += f"<tr><td>#{r['id']}</td><td>{r['tipo']}</td><td>{r['ip'] or '-'}</td><td>{r['cantidad']}</td><td>{r['monto']}</td><td>{r['estado']}</td><td>{r['created_at']}</td></tr>"
-if not ohtml:
+    # ---- Orders table ----
+    ohtml = ""
+    for r in orders_rows:
+        ohtml += (
+            "<tr>"
+            f"<td>#{r['id']}</td>"
+            f"<td>{html_escape(r['tipo'] or '')}</td>"
+            f"<td>{html_escape(r['ip'] or '-')}</td>"
+            f"<td>{r['cantidad']}</td>"
+            f"<td>{r['monto']}</td>"
+            f"<td>{html_escape(r['estado'] or '')}</td>"
+            f"<td>{html_escape(r['created_at'] or '')}</td>"
+            "</tr>"
+        )
+
+    if not ohtml:
         ohtml = "<tr><td colspan='7' class='muted'>No hay pedidos</td></tr>"
 
-body = f"""
-    """
+    body = f"""
+    <div class="card">
+      <div class="row">
+        <a class="btn" href="/">🏠 Inicio</a>
+        <a class="btn" href="/logout">🚪 Salir</a>
+      </div>
+      <div style="height:10px;"></div>
+      <div class="muted">Tu Telegram ID</div>
+      <div class="kpi">{uid}</div>
+    </div>
 
+    <h3 style="margin:12px 0 0 0;">📦 Mis proxies</h3>
+    {phtml}
+
+    <h3 style="margin:18px 0 0 0;">📨 Mis pedidos</h3>
+    <div class="card">
+      <table>
+        <tr><th>ID</th><th>Tipo</th><th>IP</th><th>Qty</th><th>Monto</th><th>Estado</th><th>Creado</th></tr>
+        {ohtml}
+      </table>
+    </div>
+    """
     return page("Panel Cliente", body)
 
 
@@ -671,7 +723,6 @@ def api_maintenance():
     enabled = get_setting("maintenance_enabled", "0") == "1"
     msg = get_setting("maintenance_message", "")
     return {"enabled": enabled, "message": msg}
-
 
 
 # =========================
@@ -687,14 +738,3 @@ def api_outbox(admin=Depends(require_admin)):
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return {"enabled": True, "items": rows}
-
-
-
-
-
-
-
-
-
-
-
