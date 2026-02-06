@@ -5,6 +5,9 @@
 # - Panel admin básico + mantenimiento ON/OFF + mensaje personalizado
 # - Opcional: crea una "outbox" para que el BOT mande broadcast (mantenimiento on/off)
 
+from fastapi import FastAPI
+app = FastAPI()
+
 import os
 import time
 import json
@@ -702,4 +705,5 @@ def api_outbox(admin=Depends(require_admin)):
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return {"enabled": True, "items": rows}
+
 
