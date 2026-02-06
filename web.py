@@ -678,7 +678,7 @@ body = f"""
       </table>
     </div>
     """
-    return page("Panel Cliente", body)
+return page("Panel Cliente", body)
 
 
 # =========================
@@ -705,6 +705,7 @@ def api_outbox(admin=Depends(require_admin)):
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return {"enabled": True, "items": rows}
+
 
 
 
