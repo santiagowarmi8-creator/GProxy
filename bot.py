@@ -819,7 +819,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(get_setting("maint_msg_on", maint_message_default(True)), reply_markup=reply_menu(False))
         return
 
-    text = config.WELCOME_MESSAGE.format(precio_primera=config.PRECIO_PRIMERA, precio_renovacion=config.PRECIO_RENOVACION)
+    text = config.WELCOME_MESSAGE.format(precio_primera=config.PRECIO_PRIMERA, precio_renovacion=config.PRECIO_RENOVACION,dias_proxy=config.DIAS_PROXY)
     await update.message.reply_text(text, reply_markup=reply_menu(is_admin))
 
 
