@@ -4,7 +4,7 @@ import os
 # TELEGRAM
 # ===============================
 
-TOKEN = os.getenv("8481696044:AAGO4EiQew5ojvJF5c4PjAJFda_tF1i0Gm4", "")
+TOKEN = os.getenv("GPROXY_BOT_TOKEN")
 ADMIN_ID = int(os.getenv("GPROXY_ADMIN_ID", "1915349159"))
 
 # ===============================
