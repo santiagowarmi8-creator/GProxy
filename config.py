@@ -1,40 +1,18 @@
 import os
 
-# ===============================
-# TELEGRAM
-# ===============================
-
-TOKEN = os.getenv("GPROXY_BOT_TOKEN")
+TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 ADMIN_ID = int(os.getenv("GPROXY_ADMIN_ID", "1915349159"))
 
-# ===============================
-# PAGOS
-# ===============================
+CUENTA_BANRESERVAS = os.getenv("CUENTA_BANRESERVAS", "4248676174")
+NOMBRE_CUENTA = os.getenv("NOMBRE_CUENTA", "YUDITH DOMINGUEZ")
 
-CUENTA_BANRESERVAS = "4248676174"
-NOMBRE_CUENTA = "YUDITH DOMINGUEZ"
-
-# ===============================
-# PRECIOS
-# ===============================
-
-PRECIO_PRIMERA = 1500
-PRECIO_RENOVACION = 1000
-
-# ===============================
-# DURACION
-# ===============================
-
-DIAS_PROXY = 30
-
-# ===============================
-# RECORDATORIOS
-# ===============================
+PRECIO_PRIMERA = int(os.getenv("PRECIO_PRIMERA", "1500"))
+PRECIO_RENOVACION = int(os.getenv("PRECIO_RENOVACION", "1000"))
+DIAS_PROXY = int(os.getenv("DIAS_PROXY", "30"))
 
 REMINDER_DAYS = [7, 3, 1, 0]
 
-WELCOME_MESSAGE = """
-🚀 Bienvenido a Gproxy | Proxies USA 🇺🇸
+WELCOME_MESSAGE = """🚀 Bienvenido a Gproxy | Proxies USA 🇺🇸
 
 🌐 Conexiones rápidas • Estables • Privadas  
 🔒 Ideal para automatización, cuentas, bots y trabajo online
@@ -58,4 +36,4 @@ WELCOME_MESSAGE = """
 🛡 Proxies verificadas
 
 👇 Usa los botones del menú para empezar
-""".strip()
+"""
