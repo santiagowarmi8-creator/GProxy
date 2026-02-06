@@ -637,7 +637,7 @@ def client_me(client=Depends(require_client)):
             raw = "HTTP\n" + raw
         proxy_text = raw or "HTTP\n" + (r['ip'] or "")
 raw_block = f"<pre>{proxy_text}</pre>"
-        phtml += f"""
+phtml += f"""
         <div class="card">
           <div class="muted">Proxy ID {r['id']} • {r['estado']}</div>
           <div style="height:6px;"></div>
@@ -705,5 +705,6 @@ def api_outbox(admin=Depends(require_admin)):
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return {"enabled": True, "items": rows}
+
 
 
