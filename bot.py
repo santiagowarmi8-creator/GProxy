@@ -2603,33 +2603,8 @@ def main():
 
 app.add_handler(MessageHandler(filters.CONTACT, on_contact))
    
-def main():
-    if not (config.TOKEN or "").strip() or "PEGA_AQUI" in (config.TOKEN or ""):
-        print("❌ FALTA TOKEN. Pon tu token en config.py.")
-        return
-
-    ensure_schema()
-
-    app = ApplicationBuilder().token(config.TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(on_callback))
-    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_voucher))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-
-    app.add_error_handler(on_error)
-
-    if app.job_queue:
-        app.job_queue.run_daily(reminders_daily_job, time=time(hour=9, minute=0, second=0))
-        print("✅ JobQueue activo")
-    else:
-        print("⚠️ JobQueue NO disponible")
-
-    # 👇 ESTA LÍNEA VA AL MISMO NIVEL QUE EL IF
     print("✅ Gproxy corriendo. Abre Telegram y escribe al bot.")
-
     app.run_polling()
-
 
 
 if __name__ == "__main__":
