@@ -44,6 +44,23 @@ conn = sqlite3.connect(DB, check_same_thread=False)
 
 
 
+# =========================
+# DB (conn / cursor) + Schema
+# =========================
+
+# Si DB_PATH ya existe en tu config, usa esa variable.
+# Si no, usa ENV. (Railway recomienda DB_PATH en Variables)
+DB_PATH = os.getenv("DB_PATH", "data.db")
+
+# Logger seguro (por si todavía no lo definiste arriba)
+import logging
+logger = logging.getLogger("gproxy")
+
+# Conexión y cursor (DEBEN existir antes de ensure_schema)
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+cursor = conn.cursor()
+
+
 def ensure_schema():
     # Crea tablas si no existen
     cursor.execute(
@@ -174,7 +191,9 @@ def ensure_schema():
     conn.commit()
 
 
+# ✅ ESTA LLAMADA DEBE QUEDAR AQUÍ (DESPUÉS DE conn/cursor)
 ensure_schema()
+
 
 # ---------------- Helpers ----------------
 def now_str() -> str:
@@ -2173,4 +2192,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
