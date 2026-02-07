@@ -2576,6 +2576,63 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         pass
 
+async def on_voucher(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    if user and user.id == config.ADMIN_ID:
+        return
+
+    # Si no tienes auth, comenta estas 3 líneas:
+    try:
+        if not auth_is_verified(user.id):
+            await update.message.reply_text("🔐 Primero verifica tu cuenta con /start.")
+            return
+    except Exception:
+        pass
+
+    req_id = context.user_data.get("awaiting_voucher_req_id")
+    req = None
+
+    if req_id:
+        req = get_request(req_id)
+        if (not req) or (req[6] != "awaiting_voucher") or (req[1] != user.id):
+            req = None
+
+    if not req:
+        req = get_latest_request_waiting_voucher(user.id)
+
+    if not req:
+        await update.message.reply_text("❌ No tienes solicitudes esperando comprobante.")
+        return
+
+    req_id, user_id, tipo, ip, cantidad, monto, estado, created_at = req
+    set_request_state(req_id, "voucher_received")
+
+    try:
+        await context.bot.forward_message(
+            chat_id=config.ADMIN_ID,
+            from_chat_id=update.message.chat_id,
+            message_id=update.message.message_id,
+        )
+    except Exception:
+        pass
+
+    await context.bot.send_message(
+        chat_id=config.ADMIN_ID,
+        text=(
+            "💰 Voucher recibido\n"
+            f"Solicitud #{req_id}\n"
+            f"Cliente: {user.id}\n"
+            f"Tipo: {tipo}\n"
+            f"IP: {ip or '-'}\n"
+            f"Cantidad: {cantidad}\n"
+            f"Monto: {monto} DOP\n"
+        ),
+        reply_markup=admin_order_detail_kb(req_id, user.id, "voucher_received"),
+    )
+
+    await update.message.reply_text("✅ Comprobante recibido. El admin lo revisará.")
+
 
 def main():
     if not (config.TOKEN or "").strip() or "PEGA_AQUI" in (config.TOKEN or ""):
