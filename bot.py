@@ -2589,20 +2589,22 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(MessageHandler(filters.CONTACT, on_contact))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_voucher))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
     app.add_error_handler(on_error)
 
     if app.job_queue:
-        app.job_queue.run_daily(reminders_daily_job, time=time(hour=9, minute=0, second=0))
+        app.job_queue.run_daily(
+            reminders_daily_job,
+            time=time(hour=9, minute=0, second=0)
+        )
         print("✅ JobQueue activo: recordatorios programados.")
     else:
         print("⚠️ JobQueue NO disponible. El bot corre normal sin recordatorios.")
         print('   Si lo quieres: py -m pip install "python-telegram-bot[job-queue]"')
 
-app.add_handler(MessageHandler(filters.CONTACT, on_contact))
-   
     print("✅ Gproxy corriendo. Abre Telegram y escribe al bot.")
     app.run_polling()
 
