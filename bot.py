@@ -12,6 +12,8 @@ import string
 import re
 import os
 import asyncio
+import hashlib
+import secrets
 from datetime import datetime, timedelta, time
 from typing import Optional, Tuple, List, Dict, Any
 
@@ -41,17 +43,18 @@ print("🔧 Iniciando Gproxy BOT (PRO FINAL + MANTENIMIENTO + IA REMOVIDA)...")
 # =========================
 # DB (conn / cursor) + Schema
 # =========================
-# Railway recomienda usar DB_PATH en Variables
 DB_PATH = os.getenv("DB_PATH", "data.db")
 
 # Conexión ÚNICA (evita duplicados que rompen el bot)
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-conn.row_factory = sqlite3.Row  # ✅ para usar r["campo"] en todo el bot
+conn.row_factory = sqlite3.Row  # ✅ permite r["campo"] para SELECTs normales
 cursor = conn.cursor()
 
 
 def ensure_schema():
-    # Crea tablas si no existen
+    # =========================
+    # Core tables (tu bot actual)
+    # =========================
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS proxies(
@@ -132,7 +135,6 @@ def ensure_schema():
         """
     )
 
-    # ✅ SETTINGS para mantenimiento / mensajes
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS settings(
@@ -142,12 +144,42 @@ def ensure_schema():
         """
     )
 
+    # =========================
+    # ✅ NUEVO: Auth por teléfono + PIN (para generar token web)
+    # =========================
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_auth(
+            user_id INTEGER PRIMARY KEY,
+            phone TEXT NOT NULL DEFAULT '',
+            phone_verified INTEGER NOT NULL DEFAULT 0,
+            pin_hash TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS otp_codes(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            phone TEXT NOT NULL DEFAULT '',
+            code_hash TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            estado TEXT NOT NULL DEFAULT 'pending'
+        )
+        """
+    )
+
     conn.commit()
 
     # ---- Migraciones HARDENED: arregla DB vieja aunque le falten columnas ----
     def ensure_column(table: str, col: str, coldef: str):
         cursor.execute(f"PRAGMA table_info({table})")
-        cols = [r[1] for r in cursor.fetchall()]  # r es tuple en PRAGMA
+        cols = [r[1] for r in cursor.fetchall()]  # PRAGMA devuelve tuples
         if col not in cols:
             try:
                 cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coldef}")
@@ -171,11 +203,24 @@ def ensure_schema():
     ensure_column("delete_tokens", "attempts", "INTEGER NOT NULL DEFAULT 0")
     ensure_column("delete_tokens", "estado", "TEXT NOT NULL DEFAULT 'pending'")
 
-    # tickets (por si DB vieja)
+    # tickets
     ensure_column("tickets", "estado", "TEXT NOT NULL DEFAULT 'open'")
     ensure_column("tickets", "mensaje", "TEXT NOT NULL DEFAULT ''")
     ensure_column("tickets", "created_at", "TEXT NOT NULL DEFAULT ''")
     ensure_column("tickets", "updated_at", "TEXT NOT NULL DEFAULT ''")
+
+    # ✅ auth tables (por si existían viejas)
+    ensure_column("user_auth", "phone", "TEXT NOT NULL DEFAULT ''")
+    ensure_column("user_auth", "phone_verified", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column("user_auth", "pin_hash", "TEXT NOT NULL DEFAULT ''")
+    ensure_column("user_auth", "created_at", "TEXT NOT NULL DEFAULT ''")
+    ensure_column("user_auth", "updated_at", "TEXT NOT NULL DEFAULT ''")
+
+    ensure_column("otp_codes", "phone", "TEXT NOT NULL DEFAULT ''")
+    ensure_column("otp_codes", "code_hash", "TEXT NOT NULL DEFAULT ''")
+    ensure_column("otp_codes", "expires_at", "TEXT NOT NULL DEFAULT ''")
+    ensure_column("otp_codes", "attempts", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column("otp_codes", "estado", "TEXT NOT NULL DEFAULT 'pending'")
 
     conn.commit()
 
@@ -865,6 +910,127 @@ def is_user_blocked_gate(user_id: int, is_admin: bool) -> bool:
     return is_blocked_user(user_id)
 
 
+# =========================
+# ✅ AUTH helpers (phone + PIN)
+# - Telegram NO permite leer el número sin que el usuario lo comparta como "Contacto"
+# - Aquí pedimos el contacto (request_contact=True) y validamos que sea del mismo usuario
+# - El “código” se envía por el mismo Telegram (no SMS)
+# =========================
+
+AUTH_OTP_MINUTES = int(getattr(config, "AUTH_OTP_MINUTES", 5))
+AUTH_OTP_MAX_ATTEMPTS = int(getattr(config, "AUTH_OTP_MAX_ATTEMPTS", 3))
+
+def _sha256(s: str) -> str:
+    import hashlib
+    return hashlib.sha256((s or "").encode("utf-8")).hexdigest()
+
+def auth_get(user_id: int) -> Optional[sqlite3.Row]:
+    try:
+        cursor.execute("SELECT user_id, phone, phone_verified, pin_hash FROM user_auth WHERE user_id=?", (user_id,))
+        return cursor.fetchone()
+    except Exception:
+        return None
+
+def auth_is_verified(user_id: int) -> bool:
+    row = auth_get(user_id)
+    return bool(row and int(row["phone_verified"] or 0) == 1 and (row["pin_hash"] or "").strip())
+
+def auth_upsert_phone(user_id: int, phone: str):
+    now = now_str()
+    cursor.execute("SELECT user_id FROM user_auth WHERE user_id=?", (user_id,))
+    row = cursor.fetchone()
+    if row:
+        cursor.execute(
+            "UPDATE user_auth SET phone=?, phone_verified=0, updated_at=? WHERE user_id=?",
+            (phone or "", now, user_id),
+        )
+    else:
+        cursor.execute(
+            "INSERT INTO user_auth(user_id, phone, phone_verified, pin_hash, created_at, updated_at) VALUES(?,?,?,?,?,?)",
+            (user_id, phone or "", 0, "", now, now),
+        )
+    conn.commit()
+
+def auth_set_verified(user_id: int, verified: bool):
+    now = now_str()
+    cursor.execute(
+        "INSERT OR IGNORE INTO user_auth(user_id, phone, phone_verified, pin_hash, created_at, updated_at) VALUES(?,?,?,?,?,?)",
+        (user_id, "", 0, "", now, now),
+    )
+    cursor.execute("UPDATE user_auth SET phone_verified=?, updated_at=? WHERE user_id=?", (1 if verified else 0, now, user_id))
+    conn.commit()
+
+def auth_set_pin(user_id: int, pin: str):
+    now = now_str()
+    cursor.execute(
+        "INSERT OR IGNORE INTO user_auth(user_id, phone, phone_verified, pin_hash, created_at, updated_at) VALUES(?,?,?,?,?,?)",
+        (user_id, "", 0, "", now, now),
+    )
+    cursor.execute("UPDATE user_auth SET pin_hash=?, updated_at=? WHERE user_id=?", (_sha256(pin), now, user_id))
+    conn.commit()
+
+def otp_create(user_id: int, phone: str) -> str:
+    code = "".join(random.choice(string.digits) for _ in range(6))
+    expires_at = (datetime.now() + timedelta(minutes=AUTH_OTP_MINUTES)).strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute(
+        "INSERT INTO otp_codes(user_id, phone, code_hash, expires_at, attempts, estado) VALUES(?,?,?,?,?,?)",
+        (user_id, phone or "", _sha256(code), expires_at, 0, "pending"),
+    )
+    conn.commit()
+    return code
+
+def otp_check_and_consume(user_id: int, code: str) -> Tuple[bool, str]:
+    """
+    Devuelve: (ok, msg)
+    """
+    cursor.execute(
+        """
+        SELECT id, code_hash, expires_at, attempts, estado
+        FROM otp_codes
+        WHERE user_id=? AND estado='pending'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (user_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return False, "❌ No tienes un código activo. Pide uno de nuevo con /start."
+
+    token_id = int(row["id"])
+    try:
+        exp_dt = datetime.strptime(row["expires_at"], "%Y-%m-%d %H:%M:%S")
+        if datetime.now() > exp_dt:
+            cursor.execute("UPDATE otp_codes SET estado='expired' WHERE id=?", (token_id,))
+            conn.commit()
+            return False, "⏳ Ese código expiró. Escribe /start y vuelve a pedirlo."
+    except Exception:
+        pass
+
+    attempts = int(row["attempts"] or 0)
+    if _sha256(code) != (row["code_hash"] or ""):
+        attempts += 1
+        cursor.execute("UPDATE otp_codes SET attempts=? WHERE id=?", (attempts, token_id))
+        if attempts >= AUTH_OTP_MAX_ATTEMPTS:
+            cursor.execute("UPDATE otp_codes SET estado='expired' WHERE id=?", (token_id,))
+        conn.commit()
+        if attempts >= AUTH_OTP_MAX_ATTEMPTS:
+            return False, "❌ Código incorrecto. Se bloqueó este intento. Escribe /start y pide otro."
+        return False, f"❌ Código incorrecto. Intentos: {attempts}/{AUTH_OTP_MAX_ATTEMPTS}"
+
+    cursor.execute("UPDATE otp_codes SET estado='done' WHERE id=?", (token_id,))
+    conn.commit()
+    return True, "✅ Código verificado."
+
+
+def auth_keyboard() -> ReplyKeyboardMarkup:
+    rows = [
+        [KeyboardButton("📲 Compartir mi número", request_contact=True)],
+        [KeyboardButton("Cancelar")],
+    ]
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=True)
+
+
 # ---------------- Core handlers ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -875,6 +1041,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "⛔ Tu acceso está bloqueado.\nUsa 🆘 Contacto de emergencia.",
             reply_markup=reply_menu(is_admin),
+        )
+        return
+
+    # ✅ Si NO está verificado, hacemos onboarding antes del menú normal (solo clientes)
+    if (not is_admin) and (not auth_is_verified(user.id)):
+        context.user_data["auth_flow"] = "await_contact"
+        await update.message.reply_text(
+            "🔐 Para usar Gproxy necesitas crear tu cuenta.\n\n"
+            "1) Presiona **📲 Compartir mi número** (Telegram Contact)\n"
+            f"2) Te mandaré un código (6 dígitos) que expira en {AUTH_OTP_MINUTES} min\n"
+            "3) Creas tu PIN (4-8 dígitos)\n\n"
+            "⚠️ Nota: Telegram no permite leer tu número sin que lo compartas tú.",
+            reply_markup=auth_keyboard(),
+            parse_mode="Markdown",
         )
         return
 
@@ -894,11 +1074,144 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=reply_menu(is_admin))
 
 
+# ✅ NUEVO: manejar contacto (phone)
+async def on_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    is_admin = user.id == config.ADMIN_ID
+    upsert_user(user.id, user.username or "")
+
+    if is_admin:
+        return
+
+    contact = getattr(update.message, "contact", None)
+    if not contact:
+        return
+
+    # Seguridad: el contacto debe ser del mismo usuario
+    if contact.user_id and int(contact.user_id) != int(user.id):
+        await update.message.reply_text("❌ Ese contacto no coincide con tu cuenta. Presiona tu propio botón 📲.")
+        return
+
+    phone = (contact.phone_number or "").strip()
+    if not phone:
+        await update.message.reply_text("❌ No pude leer el número. Intenta de nuevo con 📲 Compartir mi número.")
+        return
+
+    # Guardamos phone y generamos OTP
+    auth_upsert_phone(user.id, phone)
+    code = otp_create(user.id, phone)
+    context.user_data["auth_flow"] = "await_otp"
+
+    # En producción ideal sería SMS; aquí lo mandamos por Telegram.
+    await update.message.reply_text(
+        "✅ Número recibido.\n\n"
+        f"🔑 Tu código de verificación es: **{code}**\n"
+        f"⏳ Expira en {AUTH_OTP_MINUTES} min.\n\n"
+        "Ahora escribe ese código aquí:",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("Cancelar")]], resize_keyboard=True, one_time_keyboard=True),
+    )
+
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = (update.message.text or "").strip()
     is_admin = user.id == config.ADMIN_ID
     upsert_user(user.id, user.username or "")
+
+    # =========================
+    # ✅ AUTH flows (antes de mantenimiento)
+    # =========================
+    if not is_admin:
+        flow = context.user_data.get("auth_flow")
+
+        # Cancelar auth
+        if text.lower() == "cancelar" and flow:
+            context.user_data.pop("auth_flow", None)
+            await update.message.reply_text(
+                "✅ Cancelado. Escribe /start para comenzar de nuevo.",
+                reply_markup=reply_menu(False),
+            )
+            return
+
+        # Si no está verificado, obligamos a pasar por auth primero
+        if not auth_is_verified(user.id):
+            # Si por alguna razón no hay flow, reinícialo
+            if not flow:
+                context.user_data["auth_flow"] = "await_contact"
+                await update.message.reply_text(
+                    "🔐 Para usar Gproxy necesitas crear tu cuenta.\n\n"
+                    "Presiona **📲 Compartir mi número** para continuar.",
+                    parse_mode="Markdown",
+                    reply_markup=auth_keyboard(),
+                )
+                return
+
+            # Esperando contacto
+            if flow == "await_contact":
+                await update.message.reply_text(
+                    "📲 Presiona **Compartir mi número** para continuar.",
+                    parse_mode="Markdown",
+                    reply_markup=auth_keyboard(),
+                )
+                return
+
+            # Esperando OTP (6 dígitos)
+            if flow == "await_otp":
+                if not re.fullmatch(r"\d{6}", text):
+                    await update.message.reply_text("Escribe el código de 6 dígitos (ej: 123456) o Cancelar.")
+                    return
+
+                ok, msg = otp_check_and_consume(user.id, text)
+                if not ok:
+                    await update.message.reply_text(msg)
+                    return
+
+                auth_set_verified(user.id, True)
+                context.user_data["auth_flow"] = "await_pin_set"
+                await update.message.reply_text(
+                    "✅ Verificado.\n\nAhora crea tu **PIN** (4 a 8 dígitos). Escríbelo aquí:",
+                    parse_mode="Markdown",
+                    reply_markup=ReplyKeyboardMarkup(
+                        [[KeyboardButton("Cancelar")]],
+                        resize_keyboard=True,
+                        one_time_keyboard=True,
+                    ),
+                )
+                return
+
+            # Crear PIN
+            if flow == "await_pin_set":
+                if not re.fullmatch(r"\d{4,8}", text):
+                    await update.message.reply_text("Tu PIN debe ser numérico de 4 a 8 dígitos. Intenta otra vez.")
+                    return
+
+                auth_set_pin(user.id, text)
+                context.user_data.pop("auth_flow", None)
+
+                # Si está en mantenimiento, se lo mostramos al cliente
+                if maintenance_is_on():
+                    await update.message.reply_text(
+                        get_setting("maint_msg_on", maint_message_default(True)),
+                        reply_markup=reply_menu(False),
+                    )
+                    return
+
+                await update.message.reply_text(
+                    "✅ Cuenta creada. Ya puedes usar el bot 🙌\n\n"
+                    "Escribe /start para ver el menú.",
+                    reply_markup=reply_menu(False),
+                )
+                return
+
+            # Flow desconocido: reiniciar
+            context.user_data["auth_flow"] = "await_contact"
+            await update.message.reply_text(
+                "🔐 Vamos a crear tu cuenta.\n\nPresiona **📲 Compartir mi número**.",
+                parse_mode="Markdown",
+                reply_markup=auth_keyboard(),
+            )
+            return
 
     # 🛠 Mantenimiento (solo afecta clientes)
     if (not is_admin) and maintenance_is_on():
@@ -1026,9 +1339,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-        await update.message.reply_text(
-            f"✅ Guardadas {added}. Enviadas {sent}. Total {st['received']}/{st['cantidad']}."
-        )
+        await update.message.reply_text(f"✅ Guardadas {added}. Enviadas {sent}. Total {st['received']}/{st['cantidad']}.")
 
         if st["received"] >= st["cantidad"]:
             try:
@@ -1050,12 +1361,20 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Tu acceso está bloqueado.", reply_markup=reply_menu(False))
         return
 
+    # ✅ Si no es admin, exigir verificación antes de usar el menú (doble seguro)
+    if (not is_admin) and (not auth_is_verified(user.id)):
+        context.user_data["auth_flow"] = "await_contact"
+        await update.message.reply_text(
+            "🔐 Para usar el menú debes crear tu cuenta.\n\nPresiona **📲 Compartir mi número**.",
+            parse_mode="Markdown",
+            reply_markup=auth_keyboard(),
+        )
+        return
+
     # ====== Menú cliente ======
     if text == "🛒 Pedir proxies nuevos":
         context.user_data["flow"] = "purchase_qty"
-        await update.message.reply_text(
-            "¿Cuántos proxies quieres? (Ej: 1, 2, 5)\n\nEscribe CANCELAR para salir."
-        )
+        await update.message.reply_text("¿Cuántos proxies quieres? (Ej: 1, 2, 5)\n\nEscribe CANCELAR para salir.")
         return
 
     if context.user_data.get("flow") == "purchase_qty":
@@ -1084,7 +1403,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Total: {monto} DOP\n\n"
             f"{bank_text()}\n"
             "📸 Envía el comprobante (foto).",
-            reply_markup=client_cancel_request_kb(req_id),  # ya incluye botón 🏦 Ver cuenta
+            reply_markup=client_cancel_request_kb(req_id),
         )
         return
 
@@ -1156,7 +1475,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Total: {calc_renew_amount(1)} DOP\n\n"
             f"{bank_text()}\n"
             "📸 Envía el comprobante (foto).",
-            reply_markup=client_cancel_request_kb(req_id),  # ya incluye botón 🏦 Ver cuenta
+            reply_markup=client_cancel_request_kb(req_id),
         )
         return
 
@@ -1208,54 +1527,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     await update.message.reply_text("Usa los botones del menú 👇", reply_markup=reply_menu(is_admin))
-
-
-async def on_voucher(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id == config.ADMIN_ID:
-        return
-
-    if is_blocked_user(user.id):
-        await update.message.reply_text("⛔ No puedes enviar comprobantes porque tu acceso está bloqueado.")
-        return
-
-    req_id = context.user_data.get("awaiting_voucher_req_id")
-    req = None
-    if req_id:
-        req = get_request(req_id)
-        if not req or req[6] != "awaiting_voucher" or req[1] != user.id:
-            req = None
-
-    if not req:
-        req = get_latest_request_waiting_voucher(user.id)
-
-    if not req:
-        await update.message.reply_text("❌ No tienes solicitudes esperando comprobante.")
-        return
-
-    req_id, user_id, tipo, ip, cantidad, monto, estado, created_at = req
-    set_request_state(req_id, "voucher_received")
-
-    try:
-        await context.bot.forward_message(chat_id=config.ADMIN_ID, from_chat_id=update.message.chat_id, message_id=update.message.message_id)
-    except Exception:
-        pass
-
-    await context.bot.send_message(
-        chat_id=config.ADMIN_ID,
-        text=(
-            "💰 Voucher recibido\n"
-            f"Solicitud #{req_id}\n"
-            f"Cliente: {user.id}\n"
-            f"Tipo: {tipo}\n"
-            f"IP: {ip or '-'}\n"
-            f"Cantidad: {cantidad}\n"
-            f"Monto: {monto} DOP\n"
-        ),
-        reply_markup=admin_order_detail_kb(req_id, user.id, "voucher_received"),
-    )
-
-    await update.message.reply_text("✅ Comprobante recibido. El admin lo revisará.")
 
 
 # ---------------- Client: orders/cancel ----------------
@@ -1565,12 +1836,41 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = (query.data or "").strip()
     caller = query.from_user.id
-    await query.answer()
+
+    # ✅ Siempre responder para que no se quede “loading…”
+    try:
+        await query.answer()
+    except Exception:
+        pass
 
     # ✅ BOTÓN: “🏦 Ver cuenta”
     if data == "show_bank":
         await query.message.reply_text(bank_text())
         return
+
+    # ✅ AUTH: Reenviar teclado para compartir número (si lo usas)
+    if data == "auth_send_contact":
+        if caller == config.ADMIN_ID:
+            await query.message.reply_text("Admin no requiere verificación.")
+            return
+        # fuerza el flow a contacto
+        context.user_data["auth_flow"] = "await_contact"
+        await query.message.reply_text(
+            "📲 Presiona **Compartir mi número** para continuar.",
+            parse_mode="Markdown",
+            reply_markup=auth_keyboard(),
+        )
+        return
+
+    # ✅ Si no eres admin, no sigas con callbacks de admin
+    # (PERO ojo: callbacks de cliente deben estar antes del admin gate en tu handler completo)
+    # Aquí solo dejamos un return limpio para evitar que se rompa.
+    if caller != config.ADMIN_ID:
+        return
+
+    # Si tu handler grande de admin/cliente sigue en otra parte,
+    # deja que se ejecute allá (o mueve este bloque arriba de tu handler real).
+    return
 
     # ---------- CLIENT: cancelar pedido específico ----------
     if data.startswith("client_cancelreq_"):
@@ -2301,6 +2601,7 @@ def main():
         print("⚠️ JobQueue NO disponible. El bot corre normal sin recordatorios.")
         print('   Si lo quieres: py -m pip install "python-telegram-bot[job-queue]"')
 
+app.add_handler(MessageHandler(filters.CONTACT, on_contact))
    
     print("✅ Gproxy corriendo. Abre Telegram y escribe al bot.")
     app.run_polling()
@@ -2308,6 +2609,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
