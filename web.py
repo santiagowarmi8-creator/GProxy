@@ -25,7 +25,22 @@ DB_PATH = os.getenv("DB_PATH", "data.db")
 
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")                 # EJ: "MiClaveSuperFuerte"
 JWT_SECRET = os.getenv("JWT_SECRET", "change_me_admin")          # secreto largo random
-CLIENT_SECRET = os.getenv("CLIENT_SECRET", "change_me_client")   # secreto largo random
+import os
+import secrets
+
+# =========================
+# CLIENT SECRET (Seguro)
+# =========================
+# 1️⃣ Intenta leer de ENV (Railway / Vercel / Docker / etc)
+_client_secret_env = os.getenv("CLIENT_SECRET")
+
+# 2️⃣ Si no existe o está en default inseguro → genera uno seguro
+if not _client_secret_env or _client_secret_env.strip() in ("", "change_me_client"):
+    CLIENT_SECRET = secrets.token_urlsafe(64)  # 🔐 ~384 bits
+    print("⚠️ CLIENT_SECRET no estaba definido. Se generó uno temporal seguro.")
+else:
+    CLIENT_SECRET = _client_secret_env.strip()
+
 
 APP_TITLE = os.getenv("APP_TITLE", "Gproxy")
 ENABLE_OUTBOX = os.getenv("ENABLE_OUTBOX", "1").strip() == "1"
@@ -149,17 +164,49 @@ def sign(payload: Dict[str, Any], secret: str, exp_seconds: int = 3600) -> str:
 
 
 def verify(token: str, secret: str) -> Dict[str, Any]:
+    """
+    Verifica token tipo: base64url(payload_json).base64url(hmac_sha256(payload_json))
+    - Acepta "Bearer <token>"
+    - Valida formato, firma, JSON y expiración
+    - Lanza HTTPException(401) con detalle específico
+    """
     try:
-        a, b = token.split(".", 1)
-        raw = _b64urldecode(a)
-        sig = _b64urldecode(b)
+        if not token:
+            raise HTTPException(status_code=401, detail="No autorizado")
+
+        t = (token or "").strip()
+        if t.lower().startswith("bearer "):
+            t = t.split(" ", 1)[1].strip()
+
+        parts = t.split(".")
+        if len(parts) != 2:
+            raise HTTPException(status_code=401, detail="Token inválido")
+
+        a, b = parts[0], parts[1]
+
+        try:
+            raw = _b64urldecode(a)
+            sig = _b64urldecode(b)
+        except Exception:
+            raise HTTPException(status_code=401, detail="Token inválido")
+
         good = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).digest()
         if not hmac.compare_digest(sig, good):
-            raise ValueError("bad sig")
-        payload = json.loads(raw.decode("utf-8"))
-        if int(payload.get("exp", 0)) < int(time.time()):
-            raise ValueError("expired")
+            raise HTTPException(status_code=401, detail="Firma inválida")
+
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception:
+            raise HTTPException(status_code=401, detail="Token inválido")
+
+        exp = int(payload.get("exp", 0) or 0)
+        if exp <= 0 or exp < int(time.time()):
+            raise HTTPException(status_code=401, detail="Token expirado")
+
         return payload
+
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=401, detail="No autorizado")
 
@@ -1070,3 +1117,4 @@ def api_outbox(admin=Depends(require_admin)):
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return {"enabled": True, "items": rows}
+
