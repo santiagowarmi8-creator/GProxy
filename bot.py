@@ -38,26 +38,15 @@ logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=lo
 logger = logging.getLogger("gproxy")
 print("🔧 Iniciando Gproxy BOT (PRO FINAL + MANTENIMIENTO + IA REMOVIDA)...")
 
-# ---------------- Database ----------------
-DB = os.getenv("DB_PATH", "data.db")
-conn = sqlite3.connect(DB, check_same_thread=False)
-
-
-
 # =========================
 # DB (conn / cursor) + Schema
 # =========================
-
-# Si DB_PATH ya existe en tu config, usa esa variable.
-# Si no, usa ENV. (Railway recomienda DB_PATH en Variables)
+# Railway recomienda usar DB_PATH en Variables
 DB_PATH = os.getenv("DB_PATH", "data.db")
 
-# Logger seguro (por si todavía no lo definiste arriba)
-import logging
-logger = logging.getLogger("gproxy")
-
-# Conexión y cursor (DEBEN existir antes de ensure_schema)
+# Conexión ÚNICA (evita duplicados que rompen el bot)
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+conn.row_factory = sqlite3.Row  # ✅ para usar r["campo"] en todo el bot
 cursor = conn.cursor()
 
 
@@ -158,7 +147,7 @@ def ensure_schema():
     # ---- Migraciones HARDENED: arregla DB vieja aunque le falten columnas ----
     def ensure_column(table: str, col: str, coldef: str):
         cursor.execute(f"PRAGMA table_info({table})")
-        cols = [r[1] for r in cursor.fetchall()]
+        cols = [r[1] for r in cursor.fetchall()]  # r es tuple en PRAGMA
         if col not in cols:
             try:
                 cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coldef}")
@@ -230,13 +219,13 @@ def safe_int(x, default=0):
 def html_escape(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+
 def bank_text() -> str:
     return (
         f"🏦 Banreservas\n"
         f"Cuenta: {config.CUENTA_BANRESERVAS}\n"
         f"Nombre: {config.NOMBRE_CUENTA}\n"
     )
-
 
 
 def add_http_header(raw_block: str) -> str:
@@ -444,7 +433,14 @@ def calc_renew_amount(cantidad: int) -> int:
 PENDING_STATES = ("awaiting_voucher", "voucher_received", "awaiting_admin_verify")
 
 
-def create_request(user_id: int, tipo: str, ip: str = "", cantidad: int = 1, monto: int = 0, estado: str = "awaiting_voucher") -> int:
+def create_request(
+    user_id: int,
+    tipo: str,
+    ip: str = "",
+    cantidad: int = 1,
+    monto: int = 0,
+    estado: str = "awaiting_voucher",
+) -> int:
     cursor.execute(
         """
         INSERT INTO requests(user_id,tipo,ip,cantidad,monto,estado,created_at)
@@ -453,11 +449,14 @@ def create_request(user_id: int, tipo: str, ip: str = "", cantidad: int = 1, mon
         (user_id, tipo, ip or "", int(cantidad), int(monto), estado, now_str()),
     )
     conn.commit()
-    return cursor.lastrowid
+    return int(cursor.lastrowid)
 
 
-def get_request(req_id: int) -> Optional[Tuple]:
-    cursor.execute("SELECT id,user_id,tipo,ip,cantidad,monto,estado,created_at FROM requests WHERE id=?", (req_id,))
+def get_request(req_id: int):
+    cursor.execute(
+        "SELECT id,user_id,tipo,ip,cantidad,monto,estado,created_at FROM requests WHERE id=?",
+        (req_id,),
+    )
     return cursor.fetchone()
 
 
@@ -466,7 +465,7 @@ def set_request_state(req_id: int, estado: str):
     conn.commit()
 
 
-def get_latest_request_waiting_voucher(user_id: int) -> Optional[Tuple]:
+def get_latest_request_waiting_voucher(user_id: int):
     cursor.execute(
         """
         SELECT id,user_id,tipo,ip,cantidad,monto,estado,created_at
@@ -484,7 +483,8 @@ def user_pending_count(user_id: int) -> int:
         "SELECT COUNT(*) FROM requests WHERE user_id=? AND estado IN ('awaiting_voucher','voucher_received','awaiting_admin_verify')",
         (user_id,),
     )
-    return cursor.fetchone()[0]
+    row = cursor.fetchone()
+    return int(row[0] if row else 0)
 
 
 def has_pending_request_for_ip(user_id: int, ip: str) -> bool:
@@ -495,7 +495,8 @@ def has_pending_request_for_ip(user_id: int, ip: str) -> bool:
         """,
         (user_id, ip),
     )
-    return cursor.fetchone()[0] > 0
+    row = cursor.fetchone()
+    return int(row[0] if row else 0) > 0
 
 
 def upsert_proxy_for_user(user_id: int, ip: str, raw: str, new_vence: str) -> int:
@@ -523,14 +524,16 @@ def upsert_proxy_for_user(user_id: int, ip: str, raw: str, new_vence: str) -> in
 def renew_proxy(user_id: int, ip: str) -> str:
     cursor.execute("SELECT vence FROM proxies WHERE user_id=? AND ip=?", (user_id, ip))
     row = cursor.fetchone()
+
     base = datetime.now()
-    if row:
+    if row and row[0]:
         try:
-            old = datetime.strptime(row[0], "%Y-%m-%d")
+            old = datetime.strptime(str(row[0]), "%Y-%m-%d")
             if old > base:
                 base = old
         except Exception:
             pass
+
     new_vence = add_days_from(base, int(config.DIAS_PROXY))
 
     cursor.execute("SELECT raw FROM proxies WHERE user_id=? AND ip=?", (user_id, ip))
@@ -549,8 +552,11 @@ def activate_new_proxy(user_id: int, key: str, raw: str) -> Tuple[int, str, str]
     return pid, inicio, vence
 
 
-def get_user_proxies(user_id: int) -> List[Tuple]:
-    cursor.execute("SELECT id, ip, raw, inicio, vence, estado FROM proxies WHERE user_id=? ORDER BY id DESC", (user_id,))
+def get_user_proxies(user_id: int):
+    cursor.execute(
+        "SELECT id, ip, raw, inicio, vence, estado FROM proxies WHERE user_id=? ORDER BY id DESC",
+        (user_id,),
+    )
     return cursor.fetchall()
 
 
@@ -561,7 +567,8 @@ def create_ticket(user_id: int, mensaje: str) -> int:
         (user_id, mensaje or "", "open", now_str(), now_str()),
     )
     conn.commit()
-    tid = cursor.lastrowid
+    tid = int(cursor.lastrowid)
+
     cursor.execute(
         "INSERT INTO ticket_messages(ticket_id, sender, message, created_at) VALUES(?,?,?,?)",
         (tid, "user", mensaje or "", now_str()),
@@ -584,12 +591,12 @@ def close_ticket(ticket_id: int):
     conn.commit()
 
 
-def get_ticket(ticket_id: int) -> Optional[Tuple]:
+def get_ticket(ticket_id: int):
     cursor.execute("SELECT id, user_id, mensaje, estado, created_at, updated_at FROM tickets WHERE id=?", (ticket_id,))
     return cursor.fetchone()
 
 
-def get_ticket_messages(ticket_id: int, limit: int = 12) -> List[Tuple]:
+def get_ticket_messages(ticket_id: int, limit: int = 12):
     cursor.execute(
         """
         SELECT sender, message, created_at
@@ -601,6 +608,7 @@ def get_ticket_messages(ticket_id: int, limit: int = 12) -> List[Tuple]:
         (ticket_id, limit),
     )
     rows = cursor.fetchall()
+    rows = list(rows) if rows else []
     rows.reverse()
     return rows
 
@@ -620,7 +628,9 @@ def reply_menu(is_admin: bool = False) -> ReplyKeyboardMarkup:
 
 
 def inline_contact_admin():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🆘 Hablar con soporte (Admin)", url=f"tg://user?id={config.ADMIN_ID}")]])
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🆘 Hablar con soporte (Admin)", url=f"tg://user?id={config.ADMIN_ID}")]]
+    )
 
 
 def admin_panel_kb():
@@ -628,8 +638,14 @@ def admin_panel_kb():
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("🏠 Dashboard", callback_data="admin_dash")],
-            [InlineKeyboardButton("👥 Usuarios", callback_data="admin_users_0"), InlineKeyboardButton("📦 Proxies", callback_data="admin_proxies_menu")],
-            [InlineKeyboardButton("📨 Pedidos", callback_data="admin_orders_menu"), InlineKeyboardButton("🎫 Tickets", callback_data="admin_tickets_0")],
+            [
+                InlineKeyboardButton("👥 Usuarios", callback_data="admin_users_0"),
+                InlineKeyboardButton("📦 Proxies", callback_data="admin_proxies_menu"),
+            ],
+            [
+                InlineKeyboardButton("📨 Pedidos", callback_data="admin_orders_menu"),
+                InlineKeyboardButton("🎫 Tickets", callback_data="admin_tickets_0"),
+            ],
             [InlineKeyboardButton("🔍 Buscar", callback_data="admin_search")],
             [InlineKeyboardButton(maint, callback_data="admin_maint_menu")],
         ]
@@ -687,10 +703,14 @@ def admin_users_page_kb(user_ids: List[int], page: int, has_next: bool):
 def admin_user_detail_kb(user_id: int, is_blocked: bool):
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("📦 Ver proxies", callback_data=f"admin_user_proxies_{user_id}_0"),
-             InlineKeyboardButton("📨 Ver pedidos", callback_data=f"admin_user_orders_{user_id}_0")],
-            [InlineKeyboardButton("🚫 Bloquear" if not is_blocked else "✅ Desbloquear", callback_data=f"admin_user_toggleblock_{user_id}"),
-             InlineKeyboardButton("🗑 Eliminar usuario", callback_data=f"admin_user_del_{user_id}")],
+            [
+                InlineKeyboardButton("📦 Ver proxies", callback_data=f"admin_user_proxies_{user_id}_0"),
+                InlineKeyboardButton("📨 Ver pedidos", callback_data=f"admin_user_orders_{user_id}_0"),
+            ],
+            [
+                InlineKeyboardButton("🚫 Bloquear" if not is_blocked else "✅ Desbloquear", callback_data=f"admin_user_toggleblock_{user_id}"),
+                InlineKeyboardButton("🗑 Eliminar usuario", callback_data=f"admin_user_del_{user_id}"),
+            ],
             [InlineKeyboardButton("⬅️ Usuarios", callback_data="admin_users_0")],
             [InlineKeyboardButton("⬅️ Panel", callback_data="admin_panel")],
         ]
@@ -700,8 +720,10 @@ def admin_user_detail_kb(user_id: int, is_blocked: bool):
 def admin_user_delete_confirm_kb(user_id: int):
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("✅ CONFIRMAR ELIMINAR", callback_data=f"admin_user_del_confirm_{user_id}"),
-             InlineKeyboardButton("❌ Cancelar", callback_data=f"admin_user_{user_id}")]
+            [
+                InlineKeyboardButton("✅ CONFIRMAR ELIMINAR", callback_data=f"admin_user_del_confirm_{user_id}"),
+                InlineKeyboardButton("❌ Cancelar", callback_data=f"admin_user_{user_id}"),
+            ]
         ]
     )
 
@@ -737,8 +759,10 @@ def admin_user_orders_page_kb(user_id: int, page: int, has_next: bool):
 def admin_proxy_detail_kb(proxy_id: int, owner_id: int):
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🗑 Eliminar proxy", callback_data=f"admin_delproxy_{proxy_id}"),
-             InlineKeyboardButton("👤 Ver usuario", callback_data=f"admin_user_{owner_id}")],
+            [
+                InlineKeyboardButton("🗑 Eliminar proxy", callback_data=f"admin_delproxy_{proxy_id}"),
+                InlineKeyboardButton("👤 Ver usuario", callback_data=f"admin_user_{owner_id}"),
+            ],
             [InlineKeyboardButton("⬅️ Panel", callback_data="admin_panel")],
         ]
     )
@@ -775,8 +799,12 @@ def admin_orders_page_kb(state: str, page: int, has_next: bool):
 def admin_order_detail_kb(req_id: int, user_id: int, estado: str):
     rows = []
     if estado in ("voucher_received", "awaiting_admin_verify", "awaiting_voucher"):
-        rows.append([InlineKeyboardButton("✅ Aprobar", callback_data=f"admin_approve_{req_id}"),
-                     InlineKeyboardButton("❌ Rechazar", callback_data=f"admin_reject_{req_id}")])
+        rows.append(
+            [
+                InlineKeyboardButton("✅ Aprobar", callback_data=f"admin_approve_{req_id}"),
+                InlineKeyboardButton("❌ Rechazar", callback_data=f"admin_reject_{req_id}"),
+            ]
+        )
     rows.append([InlineKeyboardButton("👤 Ver usuario", callback_data=f"admin_user_{user_id}")])
     rows.append([InlineKeyboardButton("⬅️ Pedidos", callback_data="admin_orders_menu")])
     rows.append([InlineKeyboardButton("⬅️ Panel", callback_data="admin_panel")])
@@ -785,20 +813,34 @@ def admin_order_detail_kb(req_id: int, user_id: int, estado: str):
 
 def client_proxy_actions_kb(proxy_id: int):
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🔄 Renovar", callback_data=f"proxy_renew_{proxy_id}"),
-          InlineKeyboardButton("🗑 Eliminar", callback_data=f"proxy_delete_{proxy_id}")]]
+        [
+            [
+                InlineKeyboardButton("🔄 Renovar", callback_data=f"proxy_renew_{proxy_id}"),
+                InlineKeyboardButton("🗑 Eliminar", callback_data=f"proxy_delete_{proxy_id}"),
+            ]
+        ]
     )
 
 
+# ✅ MOD: agrega botón para ver la cuenta cuando el cliente está en “Registrar proxy existente”
 def client_register_choice_kb(ip: str):
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(f"🔄 Renovar {config.PRECIO_RENOVACION} DOP", callback_data=f"client_reg_renew_{ip}")],
-         [InlineKeyboardButton("❌ Cancelar", callback_data=f"client_reg_cancel_{ip}")]]
+        [
+            [InlineKeyboardButton(f"🔄 Renovar {config.PRECIO_RENOVACION} DOP", callback_data=f"client_reg_renew_{ip}")],
+            [InlineKeyboardButton("🏦 Ver cuenta", callback_data="show_bank")],
+            [InlineKeyboardButton("❌ Cancelar", callback_data=f"client_reg_cancel_{ip}")],
+        ]
     )
 
 
+# ✅ MOD: agrega botón para ver la cuenta cuando el cliente está en “envía comprobante”
 def client_cancel_request_kb(req_id: int):
-    return InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancelar este pedido", callback_data=f"client_cancelreq_{req_id}")]])
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🏦 Ver cuenta", callback_data="show_bank")],
+            [InlineKeyboardButton("❌ Cancelar este pedido", callback_data=f"client_cancelreq_{req_id}")],
+        ]
+    )
 
 
 def admin_ticket_detail_kb(ticket_id: int, user_id: int, estado: str):
@@ -830,15 +872,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upsert_user(user.id, user.username or "")
 
     if is_user_blocked_gate(user.id, is_admin):
-        await update.message.reply_text("⛔ Tu acceso está bloqueado.\nUsa 🆘 Contacto de emergencia.", reply_markup=reply_menu(is_admin))
+        await update.message.reply_text(
+            "⛔ Tu acceso está bloqueado.\nUsa 🆘 Contacto de emergencia.",
+            reply_markup=reply_menu(is_admin),
+        )
         return
 
     # Si está en mantenimiento, se lo mostramos al cliente
     if (not is_admin) and maintenance_is_on():
-        await update.message.reply_text(get_setting("maint_msg_on", maint_message_default(True)), reply_markup=reply_menu(False))
+        await update.message.reply_text(
+            get_setting("maint_msg_on", maint_message_default(True)),
+            reply_markup=reply_menu(False),
+        )
         return
 
-    text = config.WELCOME_MESSAGE.format(precio_primera=config.PRECIO_PRIMERA, precio_renovacion=config.PRECIO_RENOVACION,dias_proxy=config.DIAS_PROXY)
+    text = config.WELCOME_MESSAGE.format(
+        precio_primera=config.PRECIO_PRIMERA,
+        precio_renovacion=config.PRECIO_RENOVACION,
+        dias_proxy=config.DIAS_PROXY,
+    )
     await update.message.reply_text(text, reply_markup=reply_menu(is_admin))
 
 
@@ -850,7 +902,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 🛠 Mantenimiento (solo afecta clientes)
     if (not is_admin) and maintenance_is_on():
-        await update.message.reply_text(get_setting("maint_msg_on", maint_message_default(True)), reply_markup=reply_menu(False))
+        await update.message.reply_text(
+            get_setting("maint_msg_on", maint_message_default(True)),
+            reply_markup=reply_menu(False),
+        )
         return
 
     # ADMIN flows (search / ticket_reply / maint_msg)
@@ -872,6 +927,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ✅ Admin responder ticket
     if is_admin and isinstance(admin_flow, tuple) and admin_flow and admin_flow[0] == "ticket_reply":
         _, ticket_id = admin_flow
         context.user_data.pop("admin_flow", None)
@@ -896,7 +952,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 chat_id=uid,
-                text=f"📩 Respuesta de soporte (Ticket #{tid}):\n\n{reply_msg}\n\nSi necesitas más ayuda, responde aquí o abre otro ticket.",
+                text=(
+                    f"📩 Respuesta de soporte (Ticket #{tid}):\n\n"
+                    f"{reply_msg}\n\n"
+                    "Si necesitas más ayuda, responde aquí o abre otro ticket."
+                ),
             )
         except Exception:
             pass
@@ -904,6 +964,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Respondido Ticket #{tid}.", reply_markup=admin_panel_kb())
         return
 
+    # ✅ Admin búsqueda
     if is_admin and admin_flow == "search":
         context.user_data.pop("admin_flow", None)
         q = text.strip()
@@ -913,12 +974,15 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await admin_search_chat(update.message, q)
         return
 
-    # ADMIN: pegado de proxies (compra aprobada) -> SIN FIN obligatorio
+    # ✅ Admin pegado de proxies (compra aprobada) -> SIN FIN obligatorio
     if is_admin and user.id in admin_send_state:
         st = admin_send_state[user.id]
         if text.upper() == "FIN":
             try:
-                await context.bot.send_message(chat_id=st["user_id"], text="✅ Tu pedido fue cerrado por el admin. Ve a 📋 Mis proxies.")
+                await context.bot.send_message(
+                    chat_id=st["user_id"],
+                    text="✅ Tu pedido fue cerrado por el admin. Ve a 📋 Mis proxies.",
+                )
             except Exception:
                 pass
             await update.message.reply_text("✅ Proceso cerrado (FIN).", reply_markup=admin_panel_kb())
@@ -962,7 +1026,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-        await update.message.reply_text(f"✅ Guardadas {added}. Enviadas {sent}. Total {st['received']}/{st['cantidad']}.")
+        await update.message.reply_text(
+            f"✅ Guardadas {added}. Enviadas {sent}. Total {st['received']}/{st['cantidad']}."
+        )
 
         if st["received"] >= st["cantidad"]:
             try:
@@ -987,7 +1053,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ====== Menú cliente ======
     if text == "🛒 Pedir proxies nuevos":
         context.user_data["flow"] = "purchase_qty"
-        await update.message.reply_text("¿Cuántos proxies quieres? (Ej: 1, 2, 5)\n\nEscribe CANCELAR para salir.")
+        await update.message.reply_text(
+            "¿Cuántos proxies quieres? (Ej: 1, 2, 5)\n\nEscribe CANCELAR para salir."
+        )
         return
 
     if context.user_data.get("flow") == "purchase_qty":
@@ -1014,9 +1082,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💰 Pedido #{req_id}\n"
             f"Cantidad: {qty}\n"
             f"Total: {monto} DOP\n\n"
-            f"🏦 Banreservas\nCuenta: {config.CUENTA_BANRESERVAS}\nNombre: {config.NOMBRE_CUENTA}\n\n"
+            f"{bank_text()}\n"
             "📸 Envía el comprobante (foto).",
-            reply_markup=client_cancel_request_kb(req_id),
+            reply_markup=client_cancel_request_kb(req_id),  # ya incluye botón 🏦 Ver cuenta
         )
         return
 
@@ -1036,7 +1104,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Formato inválido. Ej: 104.28.1.2:8080")
             return
 
-        req_id = create_request(user.id, "registro", ip=ip, cantidad=1, monto=calc_renew_amount(1), estado="awaiting_admin_verify")
+        req_id = create_request(
+            user.id,
+            "registro",
+            ip=ip,
+            cantidad=1,
+            monto=calc_renew_amount(1),
+            estado="awaiting_admin_verify",
+        )
         context.user_data.pop("flow", None)
 
         await context.bot.send_message(
@@ -1079,9 +1154,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔄 Renovación #{req_id}\n"
             f"IP: {ip}\n"
             f"Total: {calc_renew_amount(1)} DOP\n\n"
-            f"🏦 Banreservas\nCuenta: {config.CUENTA_BANRESERVAS}\nNombre: {config.NOMBRE_CUENTA}\n\n"
+            f"{bank_text()}\n"
             "📸 Envía el comprobante (foto).",
-            reply_markup=client_cancel_request_kb(req_id),
+            reply_markup=client_cancel_request_kb(req_id),  # ya incluye botón 🏦 Ver cuenta
         )
         return
 
@@ -1207,6 +1282,18 @@ async def send_my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 
+# ============================================================
+# ✅ CALLBACK HANDLER ÚNICO (botones inline)
+# IMPORTANTE:
+# - NO uses otro handler llamado on_callback_query
+# - Deja SOLO este: on_callback
+# ============================================================
+
+def bank_button_kb():
+    # Botón inline para ver cuenta cuando el cliente quiera
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🏦 Ver cuenta", callback_data="show_bank")]])
+
+
 async def cancel_latest_pending_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     cursor.execute(
@@ -1227,7 +1314,10 @@ async def cancel_latest_pending_request(update: Update, context: ContextTypes.DE
     set_request_state(rid, "cancelled")
     await update.message.reply_text(f"✅ Pedido #{rid} cancelado.")
     try:
-        await context.bot.send_message(chat_id=config.ADMIN_ID, text=f"🗑 Cliente canceló pedido #{rid} (estado previo: {estado})\nU:{uid}")
+        await context.bot.send_message(
+            chat_id=config.ADMIN_ID,
+            text=f"🗑 Cliente canceló pedido #{rid} (estado previo: {estado})\nU:{uid}",
+        )
     except Exception:
         pass
 
@@ -1260,7 +1350,7 @@ async def handle_proxy_delete_start(user_id: int, proxy_id: int, context: Contex
 
     await context.bot.send_message(
         chat_id=user_id,
-        text=f"🔴 Clave de eliminación para {ip}: {code}\nResponde con esa clave para confirmar (expira en 2 min)."
+        text=f"🔴 Clave de eliminación para {ip}: {code}\nResponde con esa clave para confirmar (expira en 2 min).",
     )
 
 
@@ -1380,7 +1470,10 @@ async def admin_show_user_detail(chat, user_id: int):
     username, is_blocked, created_at, last_seen = urow
     cursor.execute("SELECT COUNT(*) FROM proxies WHERE user_id=?", (user_id,))
     total_proxies = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM requests WHERE user_id=? AND estado IN ('awaiting_voucher','voucher_received','awaiting_admin_verify')", (user_id,))
+    cursor.execute(
+        "SELECT COUNT(*) FROM requests WHERE user_id=? AND estado IN ('awaiting_voucher','voucher_received','awaiting_admin_verify')",
+        (user_id,),
+    )
     pending = cursor.fetchone()[0]
 
     cursor.execute("SELECT vence FROM proxies WHERE user_id=?", (user_id,))
@@ -1410,7 +1503,10 @@ async def admin_search_chat(chat, q: str):
         await chat.reply_text("Pon algo para buscar.", reply_markup=admin_panel_kb())
         return
 
-    cursor.execute("SELECT user_id, username, is_blocked FROM users WHERE username LIKE ? ORDER BY last_seen DESC LIMIT 20", (f"%{q2}%",))
+    cursor.execute(
+        "SELECT user_id, username, is_blocked FROM users WHERE username LIKE ? ORDER BY last_seen DESC LIMIT 20",
+        (f"%{q2}%",),
+    )
     urows = cursor.fetchall()
 
     cursor.execute(
@@ -1461,14 +1557,20 @@ async def send_my_proxies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, reply_markup=client_proxy_actions_kb(pid))
 
 
-# ---------------- Callbacks ----------------
+# ---------------- Callbacks (ÚNICO HANDLER REGISTRADO) ----------------
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
         return
-    await query.answer()
-    data = query.data or ""
+
+    data = (query.data or "").strip()
     caller = query.from_user.id
+    await query.answer()
+
+    # ✅ BOTÓN: “🏦 Ver cuenta”
+    if data == "show_bank":
+        await query.message.reply_text(bank_text())
+        return
 
     # ---------- CLIENT: cancelar pedido específico ----------
     if data.startswith("client_cancelreq_"):
@@ -1500,13 +1602,27 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if has_pending_request_for_ip(caller, ip):
             await query.message.reply_text("⚠️ Ya tienes solicitud pendiente para esa IP.")
             return
-        rid = create_request(caller, "renovacion", ip=ip, cantidad=1, monto=calc_renew_amount(1), estado="awaiting_voucher")
+
+        rid = create_request(
+            caller,
+            "renovacion",
+            ip=ip,
+            cantidad=1,
+            monto=calc_renew_amount(1),
+            estado="awaiting_voucher",
+        )
         context.user_data["awaiting_voucher_req_id"] = rid
+
         await query.message.reply_text(
-            f"🔄 Renovación #{rid}\nIP: {ip}\nTotal: {calc_renew_amount(1)} DOP\n\nEnvía el comprobante.",
-            reply_markup=client_cancel_request_kb(rid),
+            f"🔄 Renovación #{rid}\n"
+            f"IP: {ip}\n"
+            f"Total: {calc_renew_amount(1)} DOP\n\n"
+            "📸 Envía el comprobante (foto).\n"
+            "Si quieres ver la cuenta, toca el botón:",
+            reply_markup=kb_merge(client_cancel_request_kb(rid).inline_keyboard, bank_button_kb().inline_keyboard),
         )
         return
+
 
     # ---------- CLIENT: eliminar proxy ----------
        # ✅ FIX CRÍTICO: CLIENTE "IP verificada" -> Renovar/Cancelar (DEBE IR ANTES DEL ADMIN GATE)
@@ -2192,5 +2308,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
