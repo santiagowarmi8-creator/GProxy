@@ -1,10 +1,9 @@
-# web.py — Gproxy Web Panel (FastAPI) ✅ Admin password + Client magic link
-# SaaS premium UI + Admin sexxy + Client portal
-# - Admin login con clave (cookie segura)
-# - Clientes entran con link mágico /c/{token} (cookie segura)
-# - Lee la misma DB sqlite (data.db)
-# - Panel admin + mantenimiento ON/OFF + mensaje personalizado
-# - Outbox opcional: el bot.py puede leer y mandar broadcast
+# web.py — Gproxy Web Panel (FastAPI)
+# ✅ Admin login con clave (cookie)
+# ✅ Clientes: login por Teléfono + PIN (NO token)
+# ✅ Admin: usuarios + bloquear/desbloquear, pedidos + aprobar/rechazar, mantenimiento, proxies
+# ✅ Lee la misma DB sqlite (data.db)
+# ✅ Outbox opcional: bot.py puede leer y mandar mensajes/broadcast
 
 import os
 import time
@@ -13,7 +12,8 @@ import hmac
 import base64
 import hashlib
 import sqlite3
-from typing import Dict, Any
+import secrets
+from typing import Dict, Any, Optional
 
 from fastapi import FastAPI, Depends, HTTPException, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -23,27 +23,14 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 # =========================
 DB_PATH = os.getenv("DB_PATH", "data.db")
 
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")                 # EJ: "MiClaveSuperFuerte"
-JWT_SECRET = os.getenv("JWT_SECRET", "change_me_admin")          # secreto largo random
-import os
-import secrets
-
-# =========================
-# CLIENT SECRET (Seguro)
-# =========================
-# 1️⃣ Intenta leer de ENV (Railway / Vercel / Docker / etc)
-_client_secret_env = os.getenv("CLIENT_SECRET")
-
-# 2️⃣ Si no existe o está en default inseguro → genera uno seguro
-if not _client_secret_env or _client_secret_env.strip() in ("", "change_me_client"):
-    CLIENT_SECRET = secrets.token_urlsafe(64)  # 🔐 ~384 bits
-    print("⚠️ CLIENT_SECRET no estaba definido. Se generó uno temporal seguro.")
-else:
-    CLIENT_SECRET = _client_secret_env.strip()
-
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()           # EJ: "MiClaveSuperFuerte"
+JWT_SECRET = os.getenv("JWT_SECRET", "change_me_admin").strip()    # secreto largo random
 
 APP_TITLE = os.getenv("APP_TITLE", "Gproxy")
 ENABLE_OUTBOX = os.getenv("ENABLE_OUTBOX", "1").strip() == "1"
+
+# ✅ PIN_SECRET: recomendado (separado del CLIENT_SECRET)
+PIN_SECRET = os.getenv("PIN_SECRET", "").strip()
 
 # =========================
 # APP (IMPORTANT: 'app' MUST EXIST)
@@ -78,6 +65,20 @@ def ensure_web_schema():
         """
     )
 
+    # ✅ auth_users (para login web por teléfono+PIN)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS auth_users(
+            user_id INTEGER PRIMARY KEY,
+            phone TEXT NOT NULL DEFAULT '',
+            pin_hash TEXT NOT NULL DEFAULT '',
+            verified INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+
     # outbox (optional)
     if ENABLE_OUTBOX:
         cur.execute(
@@ -102,11 +103,45 @@ def ensure_web_schema():
         ("maintenance_message", "⚠️ Estamos en mantenimiento. Vuelve en unos minutos.", now_str()),
     )
 
+    # ✅ Persistir CLIENT_SECRET en DB para que NO cambie en cada reinicio
+    # 1) si existe env CLIENT_SECRET y no es default, lo guarda
+    # 2) si no existe env, genera 1 vez y lo guarda en settings
+    cur.execute("SELECT value FROM settings WHERE key=?", ("client_secret_persist",))
+    row = cur.fetchone()
+    db_secret = (row["value"] if row else "").strip()
+
+    env_secret = (os.getenv("CLIENT_SECRET") or "").strip()
+    if env_secret and env_secret not in ("change_me_client", ""):
+        CLIENT_SECRET = env_secret
+        if db_secret != CLIENT_SECRET:
+            cur.execute(
+                "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                ("client_secret_persist", CLIENT_SECRET, now_str()),
+            )
+    else:
+        if db_secret:
+            CLIENT_SECRET = db_secret
+        else:
+            CLIENT_SECRET = secrets.token_urlsafe(64)
+            cur.execute(
+                "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?)",
+                ("client_secret_persist", CLIENT_SECRET, now_str()),
+            )
+            print("⚠️ CLIENT_SECRET no estaba definido. Se generó y guardó uno seguro en DB (settings).")
+
+    # ✅ PIN_SECRET fallback (si no pones env, usa CLIENT_SECRET persistido)
+    global PIN_SECRET
+    if not PIN_SECRET:
+        PIN_SECRET = CLIENT_SECRET
+
     conn.commit()
     conn.close()
 
+    return CLIENT_SECRET
 
-ensure_web_schema()
+
+CLIENT_SECRET = ensure_web_schema()
 
 
 def get_setting(key: str, default: str = "") -> str:
@@ -228,6 +263,42 @@ def require_client(request: Request) -> Dict[str, Any]:
     if payload.get("role") != "client":
         raise HTTPException(401, "No autorizado")
     return payload
+
+
+# =========================
+# Client auth (phone + pin)
+# =========================
+def pin_hash(pin: str, secret: str) -> str:
+    # hash estable y fuerte con secret del servidor
+    return hmac.new(secret.encode("utf-8"), pin.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def auth_verify_phone_pin(phone: str, pin: str) -> Optional[int]:
+    phone = (phone or "").strip()
+    pin = (pin or "").strip()
+    if not phone or not pin:
+        return None
+
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, pin_hash, verified FROM auth_users WHERE phone=?", (phone,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        return None
+    if int(row["verified"] or 0) != 1:
+        return None
+
+    good = (row["pin_hash"] or "").strip()
+    if not good:
+        return None
+
+    given = pin_hash(pin, PIN_SECRET)
+    if not hmac.compare_digest(good, given):
+        return None
+
+    return int(row["user_id"])
 
 
 # =========================
@@ -419,6 +490,11 @@ def page(title: str, body: str, subtitle: str = "") -> str:
       box-shadow: 0 12px 30px rgba(0,0,0,.22);
     }}
 
+    .btn.bad {{
+      background: linear-gradient(45deg, #ff2b6a, #ff7a2b);
+      box-shadow: 0 12px 30px rgba(255,43,106,.20);
+    }}
+
     .kpi {{
       font-size: 34px;
       font-weight: 900;
@@ -455,6 +531,7 @@ def page(title: str, body: str, subtitle: str = "") -> str:
       padding: 12px;
       text-align:left;
       font-size: 13px;
+      vertical-align: top;
     }}
     th {{ color:#f0eaff; font-weight:800; }}
 
@@ -570,7 +647,7 @@ def home():
 
         <div class="row">
           <a class="btn" href="/admin/login">🔐 Admin</a>
-          <a class="btn ghost" href="/client">👤 Clientes</a>
+          <a class="btn ghost" href="/client/login">👤 Clientes</a>
         </div>
       </div>
 
@@ -585,7 +662,7 @@ def home():
         <div class="hr"></div>
         <div class="muted">Acceso de clientes</div>
         <p style="margin:8px 0 0 0; color: rgba(255,255,255,.78);">
-          Entra con el link mágico enviado por el bot: <code>/c/TOKEN</code>
+          Entra con <b>Teléfono + PIN</b> (creado en Telegram). Si no tienes PIN, crea tu cuenta en el bot con <code>/start</code>.
         </p>
       </div>
     </div>
@@ -607,7 +684,7 @@ def admin_login_page():
     <div class="grid">
       <div class="card hero">
         <h1>Admin Access</h1>
-        <p>Entra al panel premium para gestionar usuarios, ver métricas y activar mantenimiento con broadcast.</p>
+        <p>Entra al panel premium para gestionar usuarios, pedidos y mantenimiento.</p>
         <div class="hr"></div>
         <div class="pill">🧠 Control</div>
         <div class="pill" style="margin-left:8px;">📊 Métricas</div>
@@ -679,10 +756,12 @@ def admin_dashboard(admin=Depends(require_admin)):
     body = f"""
     <div class="card hero">
       <h1>Admin Dashboard</h1>
-      <p>Control total de tu plataforma: usuarios, proxies, pedidos y mantenimiento con broadcast.</p>
+      <p>Control total: usuarios, proxies, pedidos y mantenimiento.</p>
       <div class="hr"></div>
       <div class="row">
         <a class="btn" href="/admin/users">👥 Usuarios</a>
+        <a class="btn" href="/admin/orders">📨 Pedidos</a>
+        <a class="btn" href="/admin/proxies">📦 Proxies</a>
         <a class="btn" href="/admin/maintenance">🛠 Mantenimiento</a>
         <a class="btn ghost" href="/admin/logout">🚪 Salir</a>
       </div>
@@ -716,6 +795,9 @@ def admin_dashboard(admin=Depends(require_admin)):
     return page("Admin", body, subtitle="Panel premium • Gproxy")
 
 
+# =========================
+# Admin: Users
+# =========================
 @app.get("/admin/users", response_class=HTMLResponse)
 def admin_users(admin=Depends(require_admin), q: str = ""):
     conn = db()
@@ -780,6 +862,22 @@ def admin_users(admin=Depends(require_admin), q: str = ""):
     return page("Admin • Usuarios", body, subtitle="Gestión de usuarios")
 
 
+@app.post("/admin/user/{user_id}/toggle_block")
+def admin_toggle_block(user_id: int, admin=Depends(require_admin)):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT is_blocked FROM users WHERE user_id=?", (user_id,))
+    row = cur.fetchone()
+    curv = int(row["is_blocked"] or 0) if row else 0
+    newv = 0 if curv == 1 else 1
+    cur.execute("UPDATE users SET is_blocked=? WHERE user_id=?", (newv, user_id))
+    conn.commit()
+    conn.close()
+
+    outbox_add("user_block_toggled", json.dumps({"user_id": user_id, "is_blocked": newv}, ensure_ascii=False))
+    return RedirectResponse(url=f"/admin/user/{user_id}", status_code=302)
+
+
 @app.get("/admin/user/{user_id}", response_class=HTMLResponse)
 def admin_user_detail(user_id: int, admin=Depends(require_admin)):
     conn = db()
@@ -793,6 +891,8 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
 
     proxies_rows = []
     req_rows = []
+    auth_row = None
+
     try:
         cur.execute("SELECT id, ip, vence, estado FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 20", (user_id,))
         proxies_rows = cur.fetchall()
@@ -808,6 +908,13 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
     except Exception:
         req_rows = []
 
+    # ✅ mostrar teléfono si existe
+    try:
+        cur.execute("SELECT phone, verified FROM auth_users WHERE user_id=?", (user_id,))
+        auth_row = cur.fetchone()
+    except Exception:
+        auth_row = None
+
     conn.close()
 
     if not u:
@@ -822,6 +929,10 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
     uname = u["username"] or "-"
     blocked = int(u["is_blocked"] or 0)
     tag = "🚫 BLOQUEADO" if blocked == 1 else "✅ ACTIVO"
+
+    phone_txt = "-"
+    if auth_row:
+        phone_txt = (auth_row["phone"] or "-") + (" ✅" if int(auth_row["verified"] or 0) == 1 else " ⚠️")
 
     phtml = ""
     for r in proxies_rows:
@@ -845,16 +956,25 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
     if not ohtml:
         ohtml = "<tr><td colspan='7' class='muted'>Sin pedidos</td></tr>"
 
+    toggle_label = "🔓 Desbloquear" if blocked == 1 else "⛔ Bloquear"
+    toggle_class = "btn" if blocked == 1 else "btn bad"
+
     body = f"""
     <div class="card">
       <div class="row">
         <a class="btn ghost" href="/admin/users">⬅️ Usuarios</a>
         <a class="btn ghost" href="/admin">🏠 Dashboard</a>
+
+        <form method="post" action="/admin/user/{user_id}/toggle_block" style="margin-left:auto;">
+          <button class="{toggle_class}" type="submit">{toggle_label}</button>
+        </form>
       </div>
+
       <div class="hr"></div>
       <div class="muted">Usuario</div>
       <div class="kpi">{user_id}</div>
       <p class="muted">@{html_escape(uname)} • {tag}</p>
+      <p class="muted">Teléfono: <b>{html_escape(phone_txt)}</b></p>
       <p class="muted">Creado: {html_escape(u['created_at'] or '-')} • Last seen: {html_escape(u['last_seen'] or '-')}</p>
     </div>
 
@@ -875,6 +995,207 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
     </div>
     """
     return page(f"Admin • Usuario {user_id}", body, subtitle="Detalle premium")
+
+
+# =========================
+# Admin: Orders (Aprobar / Rechazar)
+# =========================
+@app.get("/admin/orders", response_class=HTMLResponse)
+def admin_orders(admin=Depends(require_admin), state: str = ""):
+    conn = db()
+    cur = conn.cursor()
+
+    where = ""
+    params = ()
+    if state.strip():
+        where = "WHERE estado=?"
+        params = (state.strip(),)
+
+    cur.execute(
+        f"""
+        SELECT id, user_id, tipo, ip, cantidad, monto, estado, created_at
+        FROM requests
+        {where}
+        ORDER BY id DESC
+        LIMIT 80
+        """,
+        params,
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    options = [
+        ("", "Todos"),
+        ("awaiting_voucher", "awaiting_voucher"),
+        ("voucher_received", "voucher_received"),
+        ("awaiting_admin_verify", "awaiting_admin_verify"),
+        ("approved", "approved"),
+        ("rejected", "rejected"),
+        ("cancelled", "cancelled"),
+    ]
+
+    opt_html = ""
+    for val, label in options:
+        sel = "selected" if (state or "") == val else ""
+        opt_html += f"<option value='{html_escape(val)}' {sel}>{html_escape(label)}</option>"
+
+    cards = ""
+    for r in rows:
+        rid = int(r["id"])
+        cards += f"""
+        <div class="card" style="margin-bottom:12px;">
+          <div class="muted">Pedido <b>#{rid}</b> • Estado: <b>{html_escape(r["estado"] or "")}</b></div>
+          <div style="height:8px;"></div>
+          <div><b>U:</b> <a class="btn ghost" href="/admin/user/{int(r["user_id"])}">👤 {int(r["user_id"])}</a></div>
+          <div class="muted" style="margin-top:6px;">
+            Tipo: <b>{html_escape(r["tipo"] or "")}</b> • IP: <b>{html_escape(r["ip"] or "-")}</b> • Qty: <b>{r["cantidad"]}</b> • Monto: <b>{r["monto"]}</b>
+            <br/>Creado: {html_escape(r["created_at"] or "")}
+          </div>
+
+          <div class="hr"></div>
+          <div class="row">
+            <form method="post" action="/admin/order/{rid}/approve">
+              <button class="btn" type="submit">✅ Aprobar</button>
+            </form>
+            <form method="post" action="/admin/order/{rid}/reject">
+              <button class="btn bad" type="submit">❌ Rechazar</button>
+            </form>
+          </div>
+
+          <p class="muted" style="margin-top:10px;">
+            Nota: si el tipo es <b>purchase</b>, la asignación de proxies se hace en Telegram (admin pega proxies allí).
+          </p>
+        </div>
+        """
+
+    if not cards:
+        cards = "<div class='card'><p class='muted'>No hay pedidos en ese filtro.</p></div>"
+
+    body = f"""
+    <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
+      </div>
+      <div class="hr"></div>
+
+      <form method="get" action="/admin/orders">
+        <label class="muted">Filtrar por estado</label>
+        <select name="state" style="width:100%;padding:12px 14px;border-radius:14px;border:1px solid rgba(255,255,255,.10);background:rgba(0,0,0,.20);color:white;">
+          {opt_html}
+        </select>
+        <div style="height:12px;"></div>
+        <button class="btn" type="submit">Aplicar filtro</button>
+      </form>
+    </div>
+
+    {cards}
+    """
+    return page("Admin • Pedidos", body, subtitle="Aprobar / Rechazar")
+
+
+@app.post("/admin/order/{rid}/approve")
+def admin_order_approve(rid: int, admin=Depends(require_admin)):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, user_id, tipo, ip, cantidad, monto, estado FROM requests WHERE id=?", (rid,))
+    req = cur.fetchone()
+    if not req:
+        conn.close()
+        raise HTTPException(404, "Pedido no encontrado")
+
+    cur.execute("UPDATE requests SET estado=? WHERE id=?", ("approved", rid))
+    conn.commit()
+    conn.close()
+
+    outbox_add("order_approved", json.dumps({"rid": rid, "user_id": int(req["user_id"]), "tipo": req["tipo"], "ip": req["ip"]}, ensure_ascii=False))
+    return RedirectResponse(url="/admin/orders", status_code=302)
+
+
+@app.post("/admin/order/{rid}/reject")
+def admin_order_reject(rid: int, admin=Depends(require_admin)):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, user_id, tipo, ip, cantidad, monto, estado FROM requests WHERE id=?", (rid,))
+    req = cur.fetchone()
+    if not req:
+        conn.close()
+        raise HTTPException(404, "Pedido no encontrado")
+
+    cur.execute("UPDATE requests SET estado=? WHERE id=?", ("rejected", rid))
+    conn.commit()
+    conn.close()
+
+    outbox_add("order_rejected", json.dumps({"rid": rid, "user_id": int(req["user_id"]), "tipo": req["tipo"], "ip": req["ip"]}, ensure_ascii=False))
+    return RedirectResponse(url="/admin/orders", status_code=302)
+
+
+# =========================
+# Admin: Proxies list
+# =========================
+@app.get("/admin/proxies", response_class=HTMLResponse)
+def admin_proxies(admin=Depends(require_admin), q: str = ""):
+    conn = db()
+    cur = conn.cursor()
+
+    if q.strip():
+        cur.execute(
+            """
+            SELECT id, user_id, ip, vence, estado
+            FROM proxies
+            WHERE CAST(user_id AS TEXT) LIKE ? OR ip LIKE ?
+            ORDER BY id DESC
+            LIMIT 80
+            """,
+            (f"%{q.strip()}%", f"%{q.strip()}%"),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT id, user_id, ip, vence, estado
+            FROM proxies
+            ORDER BY id DESC
+            LIMIT 80
+            """
+        )
+
+    rows = cur.fetchall()
+    conn.close()
+
+    trs = ""
+    for r in rows:
+        trs += (
+            "<tr>"
+            f"<td><code>{r['id']}</code></td>"
+            f"<td><a class='btn ghost' href='/admin/user/{int(r['user_id'])}'>👤 {int(r['user_id'])}</a></td>"
+            f"<td>{html_escape(r['ip'] or '')}</td>"
+            f"<td>{html_escape(r['vence'] or '')}</td>"
+            f"<td>{html_escape(r['estado'] or '')}</td>"
+            "</tr>"
+        )
+
+    body = f"""
+    <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
+      </div>
+      <div class="hr"></div>
+
+      <form method="get" action="/admin/proxies">
+        <label class="muted">Buscar (user_id o ip)</label>
+        <input name="q" value="{html_escape(q or '')}" placeholder="Ej: 1915349159 o 104." />
+        <div style="height:12px;"></div>
+        <button class="btn" type="submit">Buscar</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <table>
+        <tr><th>PID</th><th>User</th><th>IP</th><th>Vence</th><th>Estado</th></tr>
+        {trs or "<tr><td colspan='5' class='muted'>No hay proxies</td></tr>"}
+      </table>
+    </div>
+    """
+    return page("Admin • Proxies", body, subtitle="Listado rápido")
 
 
 # =========================
@@ -942,41 +1263,61 @@ def admin_maintenance_set(
 
 
 # =========================
-# Client portal
+# Client portal (Phone + PIN)
 # =========================
-@app.get("/client", response_class=HTMLResponse)
-def client_landing():
+@app.get("/client/login", response_class=HTMLResponse)
+def client_login_page():
     body = """
     <div class="grid">
       <div class="card hero">
         <h1>Panel Cliente</h1>
-        <p>Acceso seguro por link mágico enviado por el bot.</p>
+        <p>Entra con tu <b>Teléfono + PIN</b> (creado en Telegram).</p>
         <div class="hr"></div>
-        <div class="pill">🔐 Login por token</div>
-        <div class="pill" style="margin-left:8px;">📦 Tus proxies</div>
-        <div class="pill" style="margin-left:8px;">📨 Tus pedidos</div>
+        <div class="pill">📱 Teléfono</div>
+        <div class="pill" style="margin-left:8px;">🔐 PIN</div>
+        <div class="pill" style="margin-left:8px;">📦 Proxies</div>
       </div>
 
       <div class="card">
-        <p class="muted">
-          Pídele al bot tu acceso. El link se ve así:
-        </p>
-        <code>/c/TOKEN</code>
+        <form method="post" action="/client/login">
+          <label class="muted">Teléfono (ej: +1809...)</label><br/>
+          <input name="phone" placeholder="+1809..." />
+          <div style="height:12px;"></div>
+
+          <label class="muted">PIN (4-8 dígitos)</label><br/>
+          <input name="pin" type="password" placeholder="••••" />
+          <div style="height:12px;"></div>
+
+          <button class="btn" type="submit">Entrar</button>
+          <a class="btn ghost" href="/" style="margin-left:10px;">🏠 Inicio</a>
+        </form>
+
         <div class="hr"></div>
-        <a class="btn ghost" href="/">⬅️ Inicio</a>
+        <p class="muted">
+          Si no tienes PIN, abre el bot y crea tu cuenta con <code>/start</code>.
+        </p>
       </div>
     </div>
     """
-    return page("Cliente", body, subtitle="Acceso por Telegram")
+    return page("Cliente • Login", body, subtitle="Acceso seguro")
 
 
-@app.get("/c/{token}")
-def client_magic_login(token: str):
-    payload = verify(token, CLIENT_SECRET)
-    if payload.get("role") != "client":
-        raise HTTPException(401, "No autorizado")
+@app.post("/client/login")
+def client_login(phone: str = Form(...), pin: str = Form(...)):
+    uid = auth_verify_phone_pin(phone, pin)
+    if not uid:
+        body = """
+        <div class="card">
+          <h3>Login inválido</h3>
+          <p class="muted">Verifica tu teléfono y PIN. También revisa que tu cuenta esté verificada en Telegram.</p>
+          <div class="hr"></div>
+          <a class="btn" href="/client/login">⬅️ Intentar de nuevo</a>
+          <a class="btn ghost" href="/">🏠 Inicio</a>
+        </div>
+        """
+        return HTMLResponse(page("Cliente • Error", body, subtitle="No autorizado"), status_code=401)
 
-    session = sign({"role": "client", "uid": int(payload["uid"])}, CLIENT_SECRET, exp_seconds=7 * 24 * 3600)
+    session = sign({"role": "client", "uid": int(uid)}, CLIENT_SECRET, exp_seconds=7 * 24 * 3600)
     resp = RedirectResponse(url="/me", status_code=302)
     resp.set_cookie("client_session", session, httponly=True, secure=True, samesite="lax")
     return resp
@@ -1059,7 +1400,7 @@ def client_me(client=Depends(require_client)):
     body = f"""
     <div class="card hero">
       <h1>Panel Cliente</h1>
-      <p>Gestiona tus proxies, revisa pedidos y copia tu configuración en 1 click.</p>
+      <p>Gestiona tus proxies y revisa tus pedidos.</p>
       <div class="hr"></div>
       <div class="row">
         <a class="btn ghost" href="/">🏠 Inicio</a>
@@ -1075,7 +1416,7 @@ def client_me(client=Depends(require_client)):
       <div class="card" style="flex:2; min-width:240px;">
         <div class="muted">Tips</div>
         <div class="kpi">🛡️ Seguro</div>
-        <p class="muted">No compartas tu link mágico. Si crees que alguien lo vio, pide uno nuevo en el bot.</p>
+        <p class="muted">No compartas tu PIN. Si lo olvidaste, pide reset en soporte.</p>
       </div>
     </div>
 
@@ -1091,6 +1432,22 @@ def client_me(client=Depends(require_client)):
     </div>
     """
     return page("Cliente", body, subtitle="Tus proxies y pedidos")
+
+
+# =========================
+# Backwards compatibility (optional)
+# Si alguien todavía tiene link /c/TOKEN viejo, lo dejamos funcionando
+# =========================
+@app.get("/c/{token}")
+def client_magic_login(token: str):
+    payload = verify(token, CLIENT_SECRET)
+    if payload.get("role") != "client":
+        raise HTTPException(401, "No autorizado")
+
+    session = sign({"role": "client", "uid": int(payload["uid"])}, CLIENT_SECRET, exp_seconds=7 * 24 * 3600)
+    resp = RedirectResponse(url="/me", status_code=302)
+    resp.set_cookie("client_session", session, httponly=True, secure=True, samesite="lax")
+    return resp
 
 
 # =========================
@@ -1117,4 +1474,3 @@ def api_outbox(admin=Depends(require_admin)):
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return {"enabled": True, "items": rows}
-
