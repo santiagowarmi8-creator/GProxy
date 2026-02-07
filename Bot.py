@@ -39,9 +39,9 @@ logger = logging.getLogger("gproxy")
 print("🔧 Iniciando Gproxy BOT (PRO FINAL + MANTENIMIENTO + IA REMOVIDA)...")
 
 # ---------------- Database ----------------
-DB = "data.db"
+DB = os.getenv("DB_PATH", "data.db")
 conn = sqlite3.connect(DB, check_same_thread=False)
-cursor = conn.cursor()
+
 
 
 def ensure_schema():
@@ -2173,3 +2173,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
