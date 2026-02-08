@@ -148,6 +148,22 @@ def ensure_web_schema() -> str:
         """,
     )
 
+    # ✅ SOPORTE: tickets
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tickets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            subject TEXT NOT NULL DEFAULT '',
+            message TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open', -- open|answered|closed
+            admin_reply TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT ''
+        );
+        """
+    )
+
     # outbox optional
     if ENABLE_OUTBOX:
         _ensure_table_exists(
