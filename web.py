@@ -534,7 +534,7 @@ def html_escape(s: str) -> str:
 def _support_fab_html() -> str:
     # siempre visible, pero si no hay sesión lo mandamos al login con next
     return """
-      <a href="/support" class="support-fab" title="Soporte">💬</a>
+      <a href="/support" class="support-fab">💬</a>
     """
 
 
@@ -2147,22 +2147,12 @@ def client_me(client=Depends(require_client)):
         voucher_cell = f"<a href='/static/{html_escape(voucher)}' target='_blank'>ver</a>" if voucher else "-"
         ohtml += (
             "<tr>"
-            f"<td>#{r['id']}</td>"
-            f"<td>{html_escape(r['tipo'] or '')}</td>"
-            f"<td>{html_escape(r['ip'] or '-')}</td>"
-            f"<td>{r['cantidad']}</td>"
-            f"<td>{r['monto']}</td>"
-            f"<td>{html_escape(r['estado'] or '')}</td>"
-            f"<td>{html_escape(r['created_at'] or '')}</td>"
-            f"<td>{voucher_cell}</td>"
-            "</tr>"
-        )
-    if not ohtml:
+      if not ohtml:
         ohtml = "<tr><td colspan='8' class='muted'>No hay pedidos</td></tr>"
 
-    # Botón de notificaciones
-notif_badge = f"<span class='badge'>{unread}</span>" if unread > 0 else ""
-
+    # Botón de notificaciones (badge)
+    notif_badge = f"<span class='badge'>{unread}</span>" if unread > 0 else ""
+    notif_btn = f"🔔 Notificaciones {notif_badge}"
 
     body = f"""
     <div class="card hero">
@@ -2183,6 +2173,7 @@ notif_badge = f"<span class='badge'>{unread}</span>" if unread > 0 else ""
 
     <h3 style="margin:18px 0 10px 0;">📦 Mis proxies (últimos 10)</h3>
     {phtml}
+    """
 
     <h3 style="margin:18px 0 10px 0;">📨 Mis pedidos (últimos 20)</h3>
     <div class="card">
@@ -2851,4 +2842,5 @@ def api_outbox(admin=Depends(require_admin)):
 
     rows = _retry_sqlite(_do)
     return {"enabled": True, "items": rows}
+
 
