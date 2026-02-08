@@ -532,9 +532,8 @@ def html_escape(s: str) -> str:
 
 
 def _support_fab_html() -> str:
-    # siempre visible, pero si no hay sesión lo mandamos al login con next
     return """
-      <a href="/support" class="support-fab">💬</a>
+    <a href="/support?next=/me" class="support-fab" title="Soporte">💬</a>
     """
 
 
@@ -2173,12 +2172,13 @@ def client_me(client=Depends(require_client)):
 
     <h3 style="margin:18px 0 10px 0;">📦 Mis proxies (últimos 10)</h3>
     {phtml}
-    """
 
     <h3 style="margin:18px 0 10px 0;">📨 Mis pedidos (últimos 20)</h3>
     <div class="card">
       <table>
-        <tr><th>ID</th><th>Tipo</th><th>IP</th><th>Qty</th><th>Monto</th><th>Estado</th><th>Creado</th><th>Voucher</th></tr>
+        <tr>
+          <th>ID</th><th>Tipo</th><th>IP</th><th>Qty</th><th>Monto</th><th>Estado</th><th>Creado</th><th>Voucher</th>
+        </tr>
         {ohtml}
       </table>
     </div>
@@ -2192,120 +2192,9 @@ def client_me(client=Depends(require_client)):
           const s = el.getAttribute('data-exp');
           if(!s) return;
           let t = new Date(s.replace(' ', 'T')).getTime();
-          if (isNaN(t)) return;
+          if (isNaN(t)) t = new Date(s.replace(' ', 'T') + 'Z').getTime();
           let diff = Math.floor((t - now)/1000);
-          if (diff <= 0) {{ el.textContent = 'EXPIRADO'; return; }}
-          const days = Math.floor(diff / 86400);
-          diff -= days*86400;
-          const h = Math.floor(diff/3600); diff -= h*3600;
-          const m = Math.floor(diff/60); diff -= m*60;
-          const sec = diff;
-          el.textContent = (days>0? (days+'d ') : '') + pad(h)+':'+pad(m)+':'+pad(sec);
-        }});
-      }}
-      tick(); setInterval(tick, 1000);
-    </script>
-    """
-    return page("Cliente", body, subtitle="Tus proxies y pedidos")
-
-
-@app.get("/me", response_class=HTMLResponse)
-def client_me(client=Depends(require_client)):
-    uid = int(client["uid"])
-
-    # --- contar notificaciones no leídas ---
-    conn = db()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT COUNT(*) FROM notifications WHERE user_id=? AND seen=0", (uid,))
-        unread = int(cur.fetchone()[0] or 0)
-    except Exception:
-        unread = 0
-    conn.close()
-
-    notif_badge = f"<span class='badge'>{unread}</span>" if unread > 0 else ""
-
-    body = f"""
-    <div class="card hero">
-      <h1>Panel Cliente</h1>
-
-      <div class="row">
-        <a class="btn" href="/buy">🛒 Comprar proxy</a>
-
-        <a class="btn ghost" href="/notifications">
-          🔔 Notificaciones {notif_badge}
-        </a>
-
-        <a class="btn ghost" href="/logout">🚪 Salir</a>
-      </div>
-    </div>
-    """
-
-    return page("Cliente • Panel", body, subtitle="Inicio")
-
-
-@app.get("/proxies", response_class=HTMLResponse)
-def client_proxies(client=Depends(require_client)):
-    uid = int(client["uid"])
-
-    def _do():
-        conn = db_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT id, ip, inicio, vence, estado, raw FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 200", (uid,))
-        rows = cur.fetchall()
-        conn.close()
-        return rows
-
-    rows = _retry_sqlite(_do)
-
-    cards = ""
-    for r in rows:
-        raw = (r["raw"] or "").strip()
-        if raw and not raw.upper().startswith("HTTP"):
-            raw = "HTTP\n" + raw
-        proxy_text = raw or ("HTTP\n" + (r["ip"] or ""))
-        vence = (r["vence"] or "").strip()
-        countdown = f"<span class='badge' data-exp='{html_escape(vence)}'>...</span>" if vence else "<span class='badge'>-</span>"
-
-        cards += f"""
-        <div class="card">
-          <div class="muted">Proxy ID {r['id']} • {html_escape(r['estado'] or '')} • {countdown}</div>
-          <div><b>{html_escape(r['ip'] or '')}</b></div>
-          <div class="muted">Inicio: {html_escape(r['inicio'] or '')} • Vence: {html_escape(vence)}</div>
-          <div style="height:10px;"></div>
-          <pre>{html_escape(proxy_text)}</pre>
-          <div class="row">
-            <a class="btn" href="/renew?proxy_id={int(r['id'])}">♻️ Renovar</a>
-          </div>
-        </div>
-        """
-    if not cards:
-        cards = "<div class='card'><p class='muted'>No tienes proxies todavía.</p></div>"
-
-    body = f"""
-    <div class="card hero">
-      <h1>📦 Mis proxies</h1>
-      <p>Listado completo.</p>
-      <div class="hr"></div>
-      <div class="row">
-        <a class="btn ghost" href="/me">⬅️ Volver</a>
-        <a class="btn" href="/buy">🛒 Comprar</a>
-        <a class="btn ghost" href="/bank">🏦 Cuenta bancaria</a>
-      </div>
-    </div>
-    {cards}
-
-    <script>
-      function pad(n){{return String(n).padStart(2,'0');}}
-      function tick(){{
-        const els = document.querySelectorAll('[data-exp]');
-        const now = new Date().getTime();
-        els.forEach(el => {{
-          const s = el.getAttribute('data-exp');
-          if(!s) return;
-          let t = new Date(s.replace(' ', 'T')).getTime();
-          if (isNaN(t)) return;
-          let diff = Math.floor((t - now)/1000);
+          if (isNaN(diff)) {{ el.textContent='...'; return; }}
           if (diff <= 0) {{ el.textContent='EXPIRADO'; return; }}
           const days = Math.floor(diff / 86400);
           diff -= days*86400;
@@ -2315,10 +2204,12 @@ def client_proxies(client=Depends(require_client)):
           el.textContent = (days>0? (days+'d ') : '') + pad(h)+':'+pad(m)+':'+pad(sec);
         }});
       }}
-      tick(); setInterval(tick, 1000);
+      tick();
+      setInterval(tick, 1000);
     </script>
     """
-    return page("Mis proxies", body, subtitle="Listado")
+    return page("Cliente", body, subtitle="Tus proxies y pedidos")
+
 
 
 @app.get("/bank", response_class=HTMLResponse)
