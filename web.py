@@ -2155,6 +2155,7 @@ def client_me(client=Depends(require_client)):
         voucher_cell = f"<a href='/static/{html_escape(voucher)}' target='_blank'>ver</a>" if voucher else "-"
         ohtml += (
             "<tr>"
+
       if not ohtml:
         ohtml = "<tr><td colspan='8' class='muted'>No hay pedidos</td></tr>"
 
