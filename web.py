@@ -1135,6 +1135,9 @@ def admin_reset_do(
 # ADMIN: accounts
 # =========================
 @app.get("/admin/users", response_class=HTMLResponse)
+@app.get("/admin/users/", response_class=HTMLResponse)
+def admin_users(admin=Depends(require_admin), q: str = ""):
+    ...
 def admin_users(admin=Depends(require_admin), q: str = ""):
     q = (q or "").strip()
 
