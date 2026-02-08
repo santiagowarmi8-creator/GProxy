@@ -2264,6 +2264,7 @@ def client_notifications(client=Depends(require_client)):
   </div>
 </div>
     """
+
     return page("Cliente • Notificaciones", body, subtitle="Actualizaciones")
 
 
