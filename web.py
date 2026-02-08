@@ -1135,6 +1135,9 @@ def admin_reset_do(
 # ADMIN: accounts
 # =========================
 @app.get("/admin/accounts", response_class=HTMLResponse)
+@app.get("/admin/accounts/", response_class=HTMLResponse)
+def admin_accounts(admin=Depends(require_admin), q: str = ""):
+    ...
 def admin_accounts(admin=Depends(require_admin), q: str = ""):
     q = (q or "").strip()
 
@@ -1146,11 +1149,11 @@ def admin_accounts(admin=Depends(require_admin), q: str = ""):
                 """
                 SELECT id, phone, verified, created_at, updated_at
                 FROM accounts
-                WHERE phone LIKE ?
+                WHERE CAST(id AS TEXT) LIKE ? OR phone LIKE ?
                 ORDER BY id DESC
                 LIMIT 200
                 """,
-                (f"%{q}%",),
+                (f"%{q}%", f"%{q}%"),
             )
         else:
             cur.execute(
@@ -1165,32 +1168,25 @@ def admin_accounts(admin=Depends(require_admin), q: str = ""):
         conn.close()
         return rows
 
-    try:
-        rows = _retry_sqlite(_do)
-    except Exception as e:
-        # Esto evita “página en blanco” pase lo que pase
-        return nice_error_page("Error cargando cuentas", str(e), "/admin", "⬅️ Volver al dashboard")
+    rows = _retry_sqlite(_do)
 
     trs = ""
     for r in rows:
-        estado = "✅ Verificado" if int(r["verified"] or 0) == 1 else "⏳ Pendiente"
+        verified = "✅ Verificado" if int(r["verified"] or 0) == 1 else "⏳ Sin verificar"
         trs += (
             "<tr>"
             f"<td><code>{int(r['id'])}</code></td>"
             f"<td>{html_escape(r['phone'] or '')}</td>"
-            f"<td>{estado}</td>"
+            f"<td>{verified}</td>"
             f"<td>{html_escape(r['created_at'] or '')}</td>"
             f"<td>{html_escape(r['updated_at'] or '')}</td>"
             "</tr>"
         )
 
-    if not trs:
-        trs = "<tr><td colspan='5' class='muted'>No hay cuentas</td></tr>"
-
     body = f"""
     <div class="card hero">
-      <h1>👥 Cuentas (Web)</h1>
-      <p>Clientes creados desde el panel web (tabla <code>accounts</code>).</p>
+      <h1>👥 Usuarios (Web)</h1>
+      <p>Clientes registrados en el panel web.</p>
       <div class="hr"></div>
       <div class="row">
         <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
@@ -1199,21 +1195,24 @@ def admin_accounts(admin=Depends(require_admin), q: str = ""):
 
     <div class="card">
       <form method="get" action="/admin/accounts">
-        <label class="muted">Buscar por teléfono</label>
-        <input name="q" value="{html_escape(q)}" placeholder="+1809..."/>
+        <label class="muted">Buscar por ID o Teléfono</label>
+        <input name="q" value="{html_escape(q)}" placeholder="Ej: 1 o +1809..."/>
         <div style="height:12px;"></div>
         <button class="btn" type="submit">Buscar</button>
       </form>
-      <div class="hr"></div>
+    </div>
+
+    <div class="card">
       <table>
         <tr>
           <th>ID</th><th>Teléfono</th><th>Estado</th><th>Creado</th><th>Actualizado</th>
         </tr>
-        {trs}
+        {trs or "<tr><td colspan='5' class='muted'>No hay usuarios todavía.</td></tr>"}
       </table>
     </div>
     """
-    return page("Admin • Accounts", body, subtitle="Clientes Web")
+    return page("Admin • Usuarios", body, subtitle="Cuentas Web")
+
 
 
 @app.post("/admin/user/{user_id}/toggle_block")
@@ -1406,15 +1405,19 @@ def admin_orders(admin=Depends(require_admin), state: str = ""):
         """
 
         trs += (
-    "<tr>"
-    f"<td><a class='btn ghost' href='/admin/account/{int(r['id'])}'>👤 {int(r['id'])}</a></td>"
-    f"<td>{html_escape(r['phone'] or '')}</td>"
-    f"<td>{estado}</td>"
-    f"<td>{html_escape(r['created_at'] or '')}</td>"
-    f"<td>{html_escape(r['updated_at'] or '')}</td>"
-    "</tr>"
-)
-
+            "<tr>"
+            f"<td>#{rid}</td>"
+            f"<td><a class='btn ghost' href='/admin/user/{uid}'>👤 {uid}</a></td>"
+            f"<td>{html_escape(tipo)}{html_escape(extra)}</td>"
+            f"<td>{html_escape(r['ip'] or '-')}</td>"
+            f"<td>{int(r['cantidad'] or 0)}</td>"
+            f"<td>{html_escape(str(r['monto'] or '0'))}</td>"
+            f"<td>{html_escape(r['estado'] or '')}</td>"
+            f"<td>{html_escape(r['created_at'] or '')}</td>"
+            f"<td>{voucher_cell}</td>"
+            f"<td>{approve_form}{reject_form}</td>"
+            "</tr>"
+        )
 
     if not trs:
         trs = "<tr><td colspan='10' class='muted'>No hay pedidos</td></tr>"
