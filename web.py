@@ -1406,19 +1406,15 @@ def admin_orders(admin=Depends(require_admin), state: str = ""):
         """
 
         trs += (
-            "<tr>"
-            f"<td>#{rid}</td>"
-            f"<td><a class='btn ghost' href='/admin/user/{uid}'>👤 {uid}</a></td>"
-            f"<td>{html_escape(tipo)}{html_escape(extra)}</td>"
-            f"<td>{html_escape(r['ip'] or '-')}</td>"
-            f"<td>{int(r['cantidad'] or 0)}</td>"
-            f"<td>{html_escape(str(r['monto'] or '0'))}</td>"
-            f"<td>{html_escape(r['estado'] or '')}</td>"
-            f"<td>{html_escape(r['created_at'] or '')}</td>"
-            f"<td>{voucher_cell}</td>"
-            f"<td>{approve_form}{reject_form}</td>"
-            "</tr>"
-        )
+    "<tr>"
+    f"<td><a class='btn ghost' href='/admin/account/{int(r['id'])}'>👤 {int(r['id'])}</a></td>"
+    f"<td>{html_escape(r['phone'] or '')}</td>"
+    f"<td>{estado}</td>"
+    f"<td>{html_escape(r['created_at'] or '')}</td>"
+    f"<td>{html_escape(r['updated_at'] or '')}</td>"
+    "</tr>"
+)
+
 
     if not trs:
         trs = "<tr><td colspan='10' class='muted'>No hay pedidos</td></tr>"
