@@ -2263,7 +2263,6 @@ def client_notifications(client=Depends(require_client)):
     <a class="btn ghost" href="/logout">🚪 Salir</a>
   </div>
 </div>
-    {items}
     """
     return page("Cliente • Notificaciones", body, subtitle="Actualizaciones")
 
