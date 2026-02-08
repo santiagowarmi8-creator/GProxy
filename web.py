@@ -341,6 +341,214 @@ def _startup():
     global CLIENT_SECRET
     CLIENT_SECRET = ensure_web_schema()
 
+@app.get("/support", response_class=HTMLResponse)
+def support_page(client=Depends(require_client)):
+    body = """
+    <div class="card hero">
+      <h1>💬 Soporte</h1>
+      <p>Cuéntanos tu problema. Un agente te responderá lo más rápido posible.</p>
+      <div class="hr"></div>
+      <div class="row">
+        <a class="btn ghost" href="/me">⬅️ Volver</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <form method="post" action="/support">
+        <label class="muted">Asunto (opcional)</label>
+        <input name="subject" placeholder="Ej: No veo mis proxies" />
+        <div style="height:12px;"></div>
+
+        <label class="muted">Describe el problema</label>
+        <textarea name="message" placeholder="Escribe aquí..."></textarea>
+        <div style="height:12px;"></div>
+
+        <button class="btn" type="submit">📨 Enviar mensaje</button>
+      </form>
+    </div>
+    """
+    return page("Soporte", body, subtitle="Te ayudamos")
+
+@app.post("/support", response_class=HTMLResponse)
+def support_submit(
+    subject: str = Form(""),
+    message: str = Form(...),
+    client=Depends(require_client),
+):
+    uid = int(client["uid"])
+    subject = (subject or "").strip()
+    message = (message or "").strip()
+    if not message:
+        raise HTTPException(400, "Escribe tu mensaje.")
+
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO tickets(user_id,subject,message,status,admin_reply,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+        (uid, subject, message, "open", "", now_str(), now_str()),
+    )
+    conn.commit()
+    tid = cur.lastrowid
+    conn.close()
+
+    body = f"""
+    <div class="card hero">
+      <h1>✅ Mensaje enviado</h1>
+      <p>Ticket <b>#{tid}</b> creado. Te responderemos lo antes posible.</p>
+      <div class="hr"></div>
+      <a class="btn" href="/me">Volver al panel</a>
+      <a class="btn ghost" href="/support/my">Ver mis tickets</a>
+    </div>
+    """
+    return page("Soporte", body, subtitle="Listo")
+
+@app.get("/support/my", response_class=HTMLResponse)
+def support_my(client=Depends(require_client)):
+    uid = int(client["uid"])
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, subject, status, created_at, admin_reply FROM tickets WHERE user_id=? ORDER BY id DESC LIMIT 50",
+        (uid,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    items = ""
+    for r in rows:
+        reply = (r["admin_reply"] or "").strip()
+        items += f"""
+        <div class="card">
+          <div class="muted">Ticket #{r['id']} • Estado: <b>{html_escape(r['status'] or '')}</b></div>
+          <div><b>{html_escape(r['subject'] or '(Sin asunto)')}</b></div>
+          <div class="muted">Creado: {html_escape(r['created_at'] or '')}</div>
+          <div class="hr"></div>
+          <div class="muted">Respuesta admin:</div>
+          <pre>{html_escape(reply or 'Aún sin respuesta.')}</pre>
+        </div>
+        """
+
+    if not items:
+        items = "<div class='card'><p class='muted'>No tienes tickets todavía.</p></div>"
+
+    body = f"""
+    <div class="card hero">
+      <h1>📩 Mis tickets</h1>
+      <p>Historial de soporte.</p>
+      <div class="hr"></div>
+      <div class="row">
+        <a class="btn ghost" href="/me">⬅️ Volver</a>
+        <a class="btn" href="/support">💬 Nuevo ticket</a>
+      </div>
+    </div>
+    {items}
+    """
+    return page("Mis tickets", body, subtitle="Soporte")
+
+@app.get("/admin/tickets", response_class=HTMLResponse)
+def admin_tickets(admin=Depends(require_admin), status: str = ""):
+    conn = db()
+    cur = conn.cursor()
+
+    if status.strip():
+        cur.execute(
+            "SELECT id,user_id,subject,message,status,created_at FROM tickets WHERE status=? ORDER BY id DESC LIMIT 80",
+            (status.strip(),),
+        )
+    else:
+        cur.execute("SELECT id,user_id,subject,message,status,created_at FROM tickets ORDER BY id DESC LIMIT 80")
+    rows = cur.fetchall()
+    conn.close()
+
+    cards = ""
+    for r in rows:
+        cards += f"""
+        <div class="card" style="margin-bottom:12px;">
+          <div class="muted">Ticket <b>#{r['id']}</b> • Estado: <b>{html_escape(r['status'] or '')}</b></div>
+          <div style="height:6px;"></div>
+          <div><b>User:</b> {int(r['user_id'])}</div>
+          <div><b>Asunto:</b> {html_escape(r['subject'] or '(Sin asunto)')}</div>
+          <div class="muted" style="margin-top:6px;">{html_escape(r['created_at'] or '')}</div>
+          <div class="hr"></div>
+          <pre>{html_escape(r['message'] or '')}</pre>
+          <div class="hr"></div>
+          <a class="btn" href="/admin/ticket/{int(r['id'])}">Responder</a>
+        </div>
+        """
+    if not cards:
+        cards = "<div class='card'><p class='muted'>No hay tickets.</p></div>"
+
+    body = f"""
+    <div class="card hero">
+      <h1>💬 Tickets</h1>
+      <p>Soporte de clientes.</p>
+      <div class="hr"></div>
+      <div class="row">
+        <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
+      </div>
+    </div>
+    {cards}
+    """
+    return page("Admin • Tickets", body, subtitle="Soporte")
+
+@app.get("/admin/ticket/{tid}", response_class=HTMLResponse)
+def admin_ticket_detail(tid: int, admin=Depends(require_admin)):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM tickets WHERE id=?", (tid,))
+    t = cur.fetchone()
+    conn.close()
+    if not t:
+        raise HTTPException(404, "Ticket no existe")
+
+    body = f"""
+    <div class="card hero">
+      <h1>Responder ticket #{tid}</h1>
+      <p>User: <b>{int(t['user_id'])}</b> • Estado: <b>{html_escape(t['status'] or '')}</b></p>
+      <div class="hr"></div>
+      <a class="btn ghost" href="/admin/tickets">⬅️ Volver</a>
+    </div>
+
+    <div class="card">
+      <div class="muted">Mensaje del cliente</div>
+      <pre>{html_escape(t['message'] or '')}</pre>
+    </div>
+
+    <div class="card">
+      <form method="post" action="/admin/ticket/{tid}">
+        <label class="muted">Respuesta</label>
+        <textarea name="reply">{html_escape(t['admin_reply'] or '')}</textarea>
+        <div style="height:12px;"></div>
+        <div class="row">
+          <button class="btn" type="submit" name="action" value="answer">✅ Guardar respuesta</button>
+          <button class="btn ghost" type="submit" name="action" value="close">🚫 Cerrar ticket</button>
+        </div>
+      </form>
+    </div>
+    """
+    return page("Admin • Ticket", body, subtitle="Responder")
+
+@app.post("/admin/ticket/{tid}")
+def admin_ticket_reply(
+    tid: int,
+    action: str = Form("answer"),
+    reply: str = Form(""),
+    admin=Depends(require_admin),
+):
+    reply = (reply or "").strip()
+    status = "answered"
+    if action == "close":
+        status = "closed"
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE tickets SET admin_reply=?, status=?, updated_at=? WHERE id=?",
+        (reply, status, now_str(), tid),
+    )
+    conn.commit()
+    conn.close()
+    return RedirectResponse(url=f"/admin/ticket/{tid}", status_code=302)
+
 
 def get_setting(key: str, default: str = "") -> str:
     conn = db()
@@ -820,7 +1028,7 @@ def page(title: str, body: str, subtitle: str = "") -> str:
 
     {body}
 
-    <a href="/support" class="support-fab" title="Soporte">💬</a>
+    <a href="/support" class="fab">💬</a>
     <div class="footer">© {html_escape(APP_TITLE)} • Web Panel</div>
   </div>
 </body>
