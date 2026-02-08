@@ -2004,7 +2004,12 @@ def account_verify_login(phone: str, password: str) -> Optional[int]:
 def client_login(phone: str = Form(...), password: str = Form(...)):
     uid = account_verify_login(phone, password)
     if not uid:
-        return nice_error_page("Login inválido", "Teléfono/contraseña incorrectos o cuenta no verificada.", "/client/login", "↩️ Intentar de nuevo")
+        return nice_error_page(
+            "Login inválido",
+            "Teléfono/contraseña incorrectos o cuenta no verificada.",
+            "/client/login",
+            "↩️ Intentar de nuevo",
+        )
 
     session = sign({"role": "client", "uid": int(uid)}, CLIENT_SECRET, exp_seconds=7 * 24 * 3600)
     resp = RedirectResponse(url="/me", status_code=302)
@@ -2078,7 +2083,10 @@ def client_reset_submit(phone: str = Form(...), recovery_pin: str = Form(...), n
             conn.close()
             return False
 
-        cur.execute("UPDATE accounts SET password_hash=?, updated_at=? WHERE phone=?", (password_make_hash(new_password), now_str(), phone))
+        cur.execute(
+            "UPDATE accounts SET password_hash=?, updated_at=? WHERE phone=?",
+            (password_make_hash(new_password), now_str(), phone),
+        )
         conn.commit()
         conn.close()
         return True
@@ -2105,6 +2113,7 @@ def client_me(client=Depends(require_client)):
     def _do():
         conn = db_conn()
         cur = conn.cursor()
+
         cur.execute("SELECT COUNT(*) FROM notifications WHERE user_id=? AND seen=0", (uid,))
         unread = int(cur.fetchone()[0])
 
@@ -2118,10 +2127,15 @@ def client_me(client=Depends(require_client)):
         orders_rows = cur.fetchall()
 
         conn.close()
-        return unread, proxies_rows, orders_rows
+        return (unread, proxies_rows, orders_rows)
 
-    unread, proxies_rows, orders_rows = _retry_sqlite(_do)
+    result = _retry_sqlite(_do)
+    if not result:
+        return nice_error_page("Servidor ocupado", "Intenta de nuevo en unos segundos.", "/me", "🔄 Reintentar")
 
+    unread, proxies_rows, orders_rows = result
+
+    # Proxies cards con contador
     phtml = ""
     for r in proxies_rows:
         raw = (r["raw"] or "").strip()
@@ -2149,14 +2163,24 @@ def client_me(client=Depends(require_client)):
     if not phtml:
         phtml = "<div class='card'><p class='muted'>No tienes proxies todavía.</p></div>"
 
+    # ✅ ARREGLO TOTAL DE ohtml (sin paréntesis rotos)
     ohtml = ""
     for r in orders_rows:
         voucher = (r["voucher_path"] or "").strip()
         voucher_cell = f"<a href='/static/{html_escape(voucher)}' target='_blank'>ver</a>" if voucher else "-"
-        ohtml += (
-            "<tr>"
 
-      if not ohtml:
+        ohtml += "<tr>"
+        ohtml += f"<td>#{r['id']}</td>"
+        ohtml += f"<td>{html_escape(r['tipo'] or '')}</td>"
+        ohtml += f"<td>{html_escape(r['ip'] or '-')}</td>"
+        ohtml += f"<td>{int(r['cantidad'] or 0)}</td>"
+        ohtml += f"<td>{html_escape(str(r['monto'] or '0'))}</td>"
+        ohtml += f"<td>{html_escape(r['estado'] or '')}</td>"
+        ohtml += f"<td>{html_escape(r['created_at'] or '')}</td>"
+        ohtml += f"<td>{voucher_cell}</td>"
+        ohtml += "</tr>"
+
+    if not ohtml:
         ohtml = "<tr><td colspan='8' class='muted'>No hay pedidos</td></tr>"
 
     # Botón de notificaciones (badge)
@@ -2219,7 +2243,6 @@ def client_me(client=Depends(require_client)):
     </script>
     """
     return page("Cliente", body, subtitle="Tus proxies y pedidos")
-
 
 
 @app.get("/bank", response_class=HTMLResponse)
@@ -2743,5 +2766,6 @@ def api_outbox(admin=Depends(require_admin)):
 
     rows = _retry_sqlite(_do)
     return {"enabled": True, "items": rows}
+
 
 
