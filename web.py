@@ -1,15 +1,13 @@
-
 # -*- coding: utf-8 -*-
-# web.py — Gproxy Web Panel (FastAPI) — PREMIUM + FIXES
-# ✅ Admin + Cliente (cookies)
-# ✅ Clientes: signup + verify PIN + login
-# ✅ PIN recuperación para reset password
-# ✅ Comprar/Renovar + subir voucher
-# ✅ Soporte tipo tickets (burbuja flotante) sin "detail no autorizado"
-# ✅ Opción: cliente solicita "Agregar proxy existente" (admin aprueba)
-# ✅ Admin: users, orders, tickets, settings, reset/limpieza, stock contador
-# ✅ SQLite robusto: WAL + busy_timeout + retries (evita "database is locked")
-# ✅ Errores bonitos (sin stacktrace/códigos al usuario)
+# web.py — Gproxy Web Panel (FastAPI) — PREMIUM + FIXES (FULL WORKING)
+# - Admin + Cliente (cookies)
+# - Clientes: signup + verify PIN + login + reset por PIN recuperación
+# - Comprar/Renovar + subir voucher
+# - Soporte tipo tickets (burbuja flotante)
+# - "Agregar proxy existente" (claim) -> admin aprueba y se agrega a proxies
+# - Admin: users/orders/tickets/settings/stock/reset/maintenance
+# - SQLite robusto: WAL + busy_timeout + retries (evita "database is locked")
+# - Errores bonitos (sin stacktrace al usuario)
 
 import os
 import time
@@ -20,7 +18,7 @@ import hashlib
 import sqlite3
 import secrets
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional
 
 from fastapi import FastAPI, Depends, HTTPException, Request, Form, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -80,26 +78,28 @@ def fmt_dt(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _time_plus_minutes(minutes: int) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() + minutes * 60))
+
+
 # =========================
 # DB (robusto)
 # =========================
 def db_conn() -> sqlite3.Connection:
-    # timeout alto + WAL + busy_timeout evita "database is locked"
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     try:
         cur.execute("PRAGMA journal_mode=WAL;")
         cur.execute("PRAGMA synchronous=NORMAL;")
-        cur.execute("PRAGMA busy_timeout=8000;")  # 8s
+        cur.execute("PRAGMA busy_timeout=10000;")
         cur.execute("PRAGMA foreign_keys=ON;")
     except Exception:
         pass
     return conn
 
 
-def _retry_sqlite(fn, tries: int = 6, base_sleep: float = 0.12):
-    # reintento exponencial suave
+def _retry_sqlite(fn, tries: int = 7, base_sleep: float = 0.10):
     for i in range(tries):
         try:
             return fn()
@@ -262,7 +262,6 @@ def require_admin(request: Request) -> Dict[str, Any]:
 
 def require_client(request: Request) -> Dict[str, Any]:
     if not CLIENT_SECRET:
-        # si esto pasa es porque el startup no terminó
         raise HTTPException(503, "Servidor ocupado. Intenta de nuevo.")
     tok = request.cookies.get("client_session", "")
     payload = verify(tok, CLIENT_SECRET)
@@ -272,7 +271,6 @@ def require_client(request: Request) -> Dict[str, Any]:
 
 
 def try_client(request: Request) -> Optional[Dict[str, Any]]:
-    # No tira error: devuelve None si no logueado
     try:
         if not CLIENT_SECRET:
             return None
@@ -329,10 +327,6 @@ def _pin_gen(n: int = 6) -> str:
     return "".join(str(secrets.randbelow(10)) for _ in range(n))
 
 
-def _time_plus_minutes(minutes: int) -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() + minutes * 60))
-
-
 # =========================
 # Schema / migrations
 # =========================
@@ -340,19 +334,17 @@ def ensure_schema() -> str:
     conn = db_conn()
     cur = conn.cursor()
 
-    # settings
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS settings(
             key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT ''
         )
         """
     )
     conn.commit()
-    _ensure_column(conn, "settings", "updated_at", "TEXT NOT NULL DEFAULT ''")
 
-    # accounts (con recovery_pin_hash)
     _ensure_table(
         conn,
         """
@@ -369,7 +361,6 @@ def ensure_schema() -> str:
     )
     _ensure_column(conn, "accounts", "recovery_pin_hash", "TEXT NOT NULL DEFAULT ''")
 
-    # signup pins
     _ensure_table(
         conn,
         """
@@ -385,7 +376,6 @@ def ensure_schema() -> str:
         """,
     )
 
-    # tickets
     _ensure_table(
         conn,
         """
@@ -402,7 +392,6 @@ def ensure_schema() -> str:
         """,
     )
 
-    # notifications
     _ensure_table(
         conn,
         """
@@ -416,7 +405,6 @@ def ensure_schema() -> str:
         """,
     )
 
-    # admin logs
     _ensure_table(
         conn,
         """
@@ -429,7 +417,6 @@ def ensure_schema() -> str:
         """,
     )
 
-    # outbox
     if ENABLE_OUTBOX:
         _ensure_table(
             conn,
@@ -444,7 +431,6 @@ def ensure_schema() -> str:
             """,
         )
 
-    # defaults
     def ins(key: str, value: str):
         cur.execute(
             "INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES(?,?,?)",
@@ -459,8 +445,6 @@ def ensure_schema() -> str:
     ins("precio_renovacion", "1000")
     ins("dias_proxy", str(DEFAULT_DIAS_PROXY))
     ins("currency", "DOP")
-
-    # stock: solo contador
     ins("stock_available", "0")
 
     # persist CLIENT_SECRET
@@ -492,10 +476,7 @@ def ensure_schema() -> str:
     if not PIN_SECRET:
         PIN_SECRET = client_secret
 
-    conn.commit()
-
     # Migraciones en tablas del bot (si existen)
-    # requests: voucher_path, voucher_uploaded_at, email, currency, target_proxy_id, note
     try:
         _ensure_column(conn, "requests", "voucher_path", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "requests", "voucher_uploaded_at", "TEXT NOT NULL DEFAULT ''")
@@ -506,7 +487,6 @@ def ensure_schema() -> str:
     except Exception:
         pass
 
-    # proxies: inicio, vence, raw
     try:
         _ensure_column(conn, "proxies", "inicio", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "proxies", "vence", "TEXT NOT NULL DEFAULT ''")
@@ -534,10 +514,7 @@ def html_escape(s: str) -> str:
 
 
 def _support_fab_html() -> str:
-    return """
-    <a href="/support" class="support-fab">💬</a>
-
-    """
+    return """<a href="/support" class="support-fab">💬</a>"""
 
 
 def page(title: str, body: str, subtitle: str = "") -> str:
@@ -641,22 +618,10 @@ def page(title: str, body: str, subtitle: str = "") -> str:
     th{{color:#f0eaff; font-weight:900}}
     pre,code{{background:rgba(0,0,0,.25); border:1px solid rgba(255,255,255,.10); border-radius:14px; padding:12px; overflow:auto}}
     pre{{white-space:pre-wrap; word-break:break-word}}
-    .status {{
-      display:inline-flex; align-items:center; gap:8px;
-      padding:10px 12px; border-radius:999px;
-      border:1px solid rgba(255,255,255,.10); background:rgba(255,255,255,.06);
-    }}
-    .dot{{width:10px; height:10px; border-radius:50%; background:var(--ok); box-shadow:0 0 16px rgba(43,255,154,.35)}}
-    .dot.warn{{background:var(--warn); box-shadow:0 0 16px rgba(255,176,32,.35)}}
-    .footer{{margin-top:16px; color:rgba(255,255,255,.55); font-size:12px; text-align:center}}
-    .hero{{padding:18px; border-radius:20px; background:linear-gradient(135deg, rgba(123,0,255,.18), rgba(0,212,255,.10)); border:1px solid rgba(255,255,255,.10)}}
-    .hero h1{{margin:0 0 8px 0; font-size:26px}}
-    .hero p{{margin:0; color:rgba(255,255,255,.78); line-height:1.5}}
     .pill{{display:inline-flex; gap:8px; padding:8px 10px; border-radius:999px; border:1px solid rgba(255,255,255,.10); background:rgba(0,0,0,.18); font-size:12px}}
     .pinbox{{border:1px dashed rgba(255,255,255,.22); background:rgba(0,0,0,.18); border-radius:18px; padding:14px}}
     .badge{{display:inline-flex; align-items:center; justify-content:center; min-width:22px; height:22px; padding:0 8px; border-radius:999px; background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.14); font-size:12px; font-weight:900; color:white}}
 
-    /* Support bubble */
     .support-fab {{
       position: fixed; right: 18px; bottom: 18px;
       width: 58px; height: 58px; border-radius: 50%;
@@ -670,7 +635,6 @@ def page(title: str, body: str, subtitle: str = "") -> str:
     }}
     .support-fab:hover {{ transform: translateY(-2px); filter: brightness(1.05); }}
     .support-fab:active {{ transform: translateY(0px) scale(.98); }}
-
   </style>
 </head>
 <body>
@@ -691,7 +655,7 @@ def page(title: str, body: str, subtitle: str = "") -> str:
 
     {_support_fab_html()}
 
-    <div class="footer">© {html_escape(APP_TITLE)} • Web Panel</div>
+    <div class="muted" style="text-align:center; margin-top:16px;">© {html_escape(APP_TITLE)} • Web Panel</div>
   </div>
 </body>
 </html>"""
@@ -699,9 +663,9 @@ def page(title: str, body: str, subtitle: str = "") -> str:
 
 def nice_error_page(title: str, msg: str, back_href: str = "/", back_label: str = "🏠 Inicio") -> HTMLResponse:
     body = f"""
-    <div class="card hero">
-      <h1>{html_escape(title)}</h1>
-      <p>{html_escape(msg)}</p>
+    <div class="card">
+      <div class="kpi">{html_escape(title)}</div>
+      <p class="muted">{html_escape(msg)}</p>
       <div class="hr"></div>
       <a class="btn" href="{html_escape(back_href)}">{html_escape(back_label)}</a>
     </div>
@@ -710,11 +674,10 @@ def nice_error_page(title: str, msg: str, back_href: str = "/", back_label: str 
 
 
 # =========================
-# Global error handlers (sin códigos)
+# Global error handlers
 # =========================
 @app.exception_handler(HTTPException)
 async def http_exc_handler(request: Request, exc: HTTPException):
-    # si es API, devolver json normal
     accept = (request.headers.get("accept") or "").lower()
     if "application/json" in accept and "text/html" not in accept:
         return HTMLResponse(content=json.dumps({"detail": exc.detail}), status_code=exc.status_code)
@@ -730,165 +693,50 @@ async def http_exc_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(Exception)
 async def unhandled_exc_handler(request: Request, exc: Exception):
-    # No mostrar stacktrace al usuario
     return nice_error_page("Ocurrió un error interno", "Intenta de nuevo. Si continúa, contacta soporte.", "/", "🏠 Inicio")
 
 
 # =========================
-# Public
+# HOME
 # =========================
-# =========================
-# Client portal
-# =========================
-@app.get("/me", response_class=HTMLResponse)
-def client_me(client=Depends(require_client)):
-    uid = int(client["uid"])
-
+@app.get("/", response_class=HTMLResponse)
+def home(request: Request):
     maint = get_setting("maintenance_enabled", "0") == "1"
-    if maint:
-        msg = get_setting("maintenance_message", "⚠️ Estamos en mantenimiento.")
-        return nice_error_page("Mantenimiento", msg, "/logout", "🚪 Salir")
+    mtxt = get_setting("maintenance_message", "")
+    status = "🟠 Mantenimiento" if maint else "🟢 Online"
 
-    def _do():
-        conn = db_conn()
-        cur = conn.cursor()
-
-        cur.execute("SELECT COUNT(*) FROM notifications WHERE user_id=? AND seen=0", (uid,))
-        unread = int(cur.fetchone()[0])
-
-        cur.execute(
-            "SELECT id, ip, inicio, vence, estado, raw FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 10",
-            (uid,),
-        )
-        proxies_rows = cur.fetchall()
-
-        cur.execute(
-            "SELECT id, tipo, ip, cantidad, monto, estado, created_at, voucher_path "
-            "FROM requests WHERE user_id=? ORDER BY id DESC LIMIT 20",
-            (uid,),
-        )
-        orders_rows = cur.fetchall()
-
-        conn.close()
-        return unread, proxies_rows, orders_rows
-
-    unread, proxies_rows, orders_rows = _retry_sqlite(_do)
-
-    # ---- Proxies cards ----
-    phtml = ""
-    for r in proxies_rows:
-        raw = (r["raw"] or "").strip()
-        if raw and not raw.upper().startswith("HTTP"):
-            raw = "HTTP\n" + raw
-        proxy_text = raw or ("HTTP\n" + (r["ip"] or ""))
-
-        vence = (r["vence"] or "").strip()
-        countdown = (
-            f"<span class='badge' data-exp='{html_escape(vence)}'>...</span>"
-            if vence else "<span class='badge'>-</span>"
-        )
-
-        phtml += f"""
-        <div class="card">
-          <div class="muted">Proxy ID {int(r['id'])} • {html_escape(r['estado'] or '')} • {countdown}</div>
-          <div style="height:6px;"></div>
-          <div><b>{html_escape(r['ip'] or '')}</b></div>
-          <div class="muted">Inicio: {html_escape(r['inicio'] or '')} • Vence: {html_escape(vence)}</div>
-          <div style="height:10px;"></div>
-          <pre>{html_escape(proxy_text)}</pre>
-          <div class="row">
-            <a class="btn ghost" href="/renew?proxy_id={int(r['id'])}">♻️ Renovar</a>
-          </div>
-        </div>
-        """
-
-    if not phtml:
-        phtml = "<div class='card'><p class='muted'>No tienes proxies todavía.</p></div>"
-
-    # ---- Orders table rows (FIX) ----
-    ohtml = ""
-    for r in orders_rows:
-        voucher = (r["voucher_path"] or "").strip()
-        voucher_cell = (
-            f"<a href='/static/{html_escape(voucher)}' target='_blank'>ver</a>"
-            if voucher else "-"
-        )
-
-        ohtml += "<tr>"
-            f"<td>#{int(r['id'])}</td>"
-            f"<td>{html_escape(r['tipo'] or '')}</td>"
-            f"<td>{html_escape(r['ip'] or '-')}</td>"
-            f"<td>{int(r['cantidad'] or 0)}</td>"
-            f"<td>{html_escape(str(r['monto'] or '0'))}</td>"
-            f"<td>{html_escape(r['estado'] or '')}</td>"
-            f"<td>{html_escape(r['created_at'] or '')}</td>"
-            f"<td>{voucher_cell}</td>"
-            "</tr>"
-
-    if not ohtml:
-        ohtml = "<tr><td colspan='8' class='muted'>No hay pedidos</td></tr>"
-
-    # Botón de notificaciones (badge)
-    notif_badge = f"<span class='badge'>{unread}</span>" if int(unread) > 0 else ""
-    notif_btn = f"🔔 Notificaciones {notif_badge}"
+    c = try_client(request)
+    me_btn = "<a class='btn' href='/me'>👤 Mi panel</a>" if c else "<a class='btn ghost' href='/client/login'>👤 Clientes</a>"
 
     body = f"""
-    <div class="card hero">
-      <h1>Panel Cliente</h1>
-      <p>Gestiona tus proxies, pedidos, y soporte.</p>
-      <div class="hr"></div>
+    <div class="grid">
+      <div class="card">
+        <div class="pill">⚡ Premium Panel</div>
+        <div class="pill" style="margin-left:8px;">🔒 Seguro</div>
+        <div class="pill" style="margin-left:8px;">💬 Tickets</div>
+        <div style="height:12px;"></div>
 
-      <div class="row">
-        <a class="btn" href="/buy">🛒 Comprar proxy</a>
-        <a class="btn" href="/renew">♻️ Renovar proxy</a>
-        <a class="btn ghost" href="/add-existing">➕ Agregar proxy existente</a>
-        <a class="btn ghost" href="/proxies">📦 Mis proxies</a>
-        <a class="btn ghost" href="/bank">🏦 Cuenta bancaria</a>
-        <a class="btn ghost" href="/notifications">{notif_btn}</a>
-        <a class="btn ghost" href="/logout" style="margin-left:auto;">🚪 Salir</a>
+        <div class="kpi">{html_escape(APP_TITLE)}</div>
+        <p class="muted">Compra, renueva, sube voucher y gestiona soporte desde aquí.</p>
+        <div class="hr"></div>
+
+        <div class="row">
+          <a class="btn" href="/admin/login">🔐 Admin</a>
+          {me_btn}
+          <a class="btn ghost" href="/client/signup">✨ Crear cuenta</a>
+          <a class="btn ghost" href="/support">💬 Soporte</a>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="muted">Estado del sistema</div>
+        <div class="kpi">{status}</div>
+        <div class="hr"></div>
+        <pre>{html_escape(mtxt) if maint else "Todo funcionando perfecto."}</pre>
       </div>
     </div>
-
-    <h3 style="margin:18px 0 10px 0;">📦 Mis proxies (últimos 10)</h3>
-    {phtml}
-
-    <h3 style="margin:18px 0 10px 0;">📨 Mis pedidos (últimos 20)</h3>
-    <div class="card">
-      <table>
-        <tr>
-          <th>ID</th><th>Tipo</th><th>IP</th><th>Qty</th><th>Monto</th><th>Estado</th><th>Creado</th><th>Voucher</th>
-        </tr>
-        {ohtml}
-      </table>
-    </div>
-
-    <script>
-      function pad(n){{return String(n).padStart(2,'0');}}
-      function tick(){{
-        const els = document.querySelectorAll('[data-exp]');
-        const now = new Date().getTime();
-        els.forEach(el => {{
-          const s = el.getAttribute('data-exp');
-          if(!s) return;
-          let t = new Date(s.replace(' ', 'T')).getTime();
-          if (isNaN(t)) t = new Date(s.replace(' ', 'T') + 'Z').getTime();
-          let diff = Math.floor((t - now)/1000);
-          if (isNaN(diff)) {{ el.textContent='...'; return; }}
-          if (diff <= 0) {{ el.textContent='EXPIRADO'; return; }}
-          const days = Math.floor(diff / 86400);
-          diff -= days*86400;
-          const h = Math.floor(diff/3600); diff -= h*3600;
-          const m = Math.floor(diff/60); diff -= m*60;
-          const sec = diff;
-          el.textContent = (days>0? (days+'d ') : '') + pad(h)+':'+pad(m)+':'+pad(sec);
-        }});
-      }}
-      tick();
-      setInterval(tick, 1000);
-    </script>
     """
-
-    return page("Cliente", body, subtitle="Tus proxies y pedidos")
+    return page(APP_TITLE, body, subtitle="Premium Panel • Admin & Cliente")
 
 
 @app.get("/health")
@@ -897,17 +745,16 @@ def health():
 
 
 # =========================
-# Admin Auth
+# ADMIN AUTH
 # =========================
 @app.get("/admin/login", response_class=HTMLResponse)
 def admin_login_page():
     body = """
     <div class="grid">
-      <div class="card hero">
-        <h1>Admin Access</h1>
-        <p>Panel premium para gestionar usuarios, pedidos, soporte y configuraciones.</p>
+      <div class="card">
+        <div class="kpi">Admin Access</div>
+        <p class="muted">Control total: usuarios, pedidos, soporte, ajustes y limpieza.</p>
       </div>
-
       <div class="card">
         <form method="post" action="/admin/login">
           <label class="muted">Clave Admin</label>
@@ -927,7 +774,6 @@ def admin_login(password: str = Form(...)):
     if not ADMIN_PASSWORD:
         raise HTTPException(500, "Falta ADMIN_PASSWORD en variables.")
     if (password or "").strip() != ADMIN_PASSWORD:
-        # sin “códigos”
         return nice_error_page("Clave incorrecta", "La clave admin no es válida.", "/admin/login", "↩️ Intentar de nuevo")
 
     token = sign({"role": "admin"}, JWT_SECRET, exp_seconds=8 * 3600)
@@ -944,7 +790,7 @@ def admin_logout():
 
 
 # =========================
-# Admin Dashboard
+# ADMIN DASHBOARD
 # =========================
 @app.get("/admin", response_class=HTMLResponse)
 def admin_dashboard(admin=Depends(require_admin)):
@@ -952,16 +798,16 @@ def admin_dashboard(admin=Depends(require_admin)):
         def _do():
             conn = db_conn()
             cur = conn.cursor()
-            cur.execute(sql)
-            v = int(cur.fetchone()[0])
+            try:
+                cur.execute(sql)
+                v = int(cur.fetchone()[0])
+            except Exception:
+                v = 0
             conn.close()
             return v
-        try:
-            return _retry_sqlite(_do)
-        except Exception:
-            return 0
+        return _retry_sqlite(_do)
 
-    users = count("SELECT COUNT(*) FROM users")  # del bot
+    users = count("SELECT COUNT(*) FROM users")  # del bot (si existe)
     proxies = count("SELECT COUNT(*) FROM proxies")
     pending = count("SELECT COUNT(*) FROM requests WHERE estado IN ('awaiting_voucher','voucher_received','awaiting_admin_verify')")
     tickets = count("SELECT COUNT(*) FROM tickets WHERE status='open'")
@@ -971,9 +817,9 @@ def admin_dashboard(admin=Depends(require_admin)):
     mtxt = get_setting("maintenance_message", "")
 
     body = f"""
-    <div class="card hero">
-      <h1>Admin Dashboard</h1>
-      <p>Control total: usuarios, pedidos, soporte, ajustes y limpieza.</p>
+    <div class="card">
+      <div class="kpi">Admin Dashboard</div>
+      <p class="muted">Panel premium. Todo lo importante aquí.</p>
       <div class="hr"></div>
       <div class="row">
         <a class="btn" href="/admin/users">👥 Usuarios</a>
@@ -1014,11 +860,11 @@ def admin_dashboard(admin=Depends(require_admin)):
       <a class="btn ghost" href="/admin/maintenance">🛠 Configurar mantenimiento</a>
     </div>
     """
-    return page("Admin", body, subtitle="Panel premium • Gproxy")
+    return page("Admin", body, subtitle="Panel premium")
 
 
 # =========================
-# Admin Settings
+# ADMIN SETTINGS / STOCK / MAINTENANCE / RESET
 # =========================
 @app.get("/admin/settings", response_class=HTMLResponse)
 def admin_settings_page(admin=Depends(require_admin)):
@@ -1030,14 +876,12 @@ def admin_settings_page(admin=Depends(require_admin)):
     currency = get_setting("currency", "DOP")
 
     body = f"""
-    <div class="card hero">
-      <h1>⚙️ Banco / Precios</h1>
-      <p>Configura datos y precios.</p>
-      <div class="hr"></div>
-      <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
-    </div>
-
     <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
+      </div>
+      <div class="hr"></div>
+
       <form method="post" action="/admin/settings">
         <h3 style="margin:0 0 10px 0;">🏦 Cuenta bancaria</h3>
         <label class="muted">Título</label>
@@ -1107,21 +951,16 @@ def admin_settings_save(
     return RedirectResponse(url="/admin/settings", status_code=302)
 
 
-# =========================
-# Admin Stock (contador)
-# =========================
 @app.get("/admin/stock", response_class=HTMLResponse)
 def admin_stock_page(admin=Depends(require_admin)):
     stock = get_setting("stock_available", "0")
     body = f"""
-    <div class="card hero">
-      <h1>🧰 Stock</h1>
-      <p>Solo contador: cuántas proxies hay disponibles.</p>
-      <div class="hr"></div>
-      <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
-    </div>
-
     <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
+      </div>
+      <div class="hr"></div>
+
       <form method="post" action="/admin/stock">
         <label class="muted">Proxies disponibles</label>
         <input name="stock_available" value="{html_escape(stock)}" />
@@ -1129,7 +968,7 @@ def admin_stock_page(admin=Depends(require_admin)):
         <button class="btn" type="submit">💾 Guardar stock</button>
       </form>
       <div class="hr"></div>
-      <p class="muted">Este número baja cuando apruebas compras (si decides descontarlo).</p>
+      <p class="muted">Contador simple. Baja cuando apruebas compras.</p>
     </div>
     """
     return page("Admin • Stock", body, subtitle="Inventario")
@@ -1148,23 +987,18 @@ def admin_stock_save(stock_available: str = Form("0"), admin=Depends(require_adm
     return RedirectResponse(url="/admin/stock", status_code=303)
 
 
-# =========================
-# Admin Maintenance
-# =========================
 @app.get("/admin/maintenance", response_class=HTMLResponse)
 def admin_maintenance_page(admin=Depends(require_admin)):
     enabled = get_setting("maintenance_enabled", "0") == "1"
     msg = get_setting("maintenance_message", "")
 
     body = f"""
-    <div class="card hero">
-      <h1>Mantenimiento</h1>
-      <p>Activa o desactiva mantenimiento.</p>
-      <div class="hr"></div>
-      <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
-    </div>
-
     <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
+      </div>
+      <div class="hr"></div>
+
       <div class="muted">Estado actual</div>
       <div class="kpi">{'🟠 ON' if enabled else '🟢 OFF'}</div>
       <div class="hr"></div>
@@ -1192,517 +1026,33 @@ def admin_maintenance_set(action: str = Form(...), message: str = Form(""), admi
         set_setting("maintenance_enabled", "1")
         outbox_add("maintenance_on", msg)
         admin_log("maintenance_on", msg)
-        return RedirectResponse(url="/admin/maintenance", status_code=302)
-
-    if action == "off":
+    elif action == "off":
         set_setting("maintenance_enabled", "0")
         outbox_add("maintenance_off", msg)
         admin_log("maintenance_off", msg)
-        return RedirectResponse(url="/admin/maintenance", status_code=302)
 
     return RedirectResponse(url="/admin/maintenance", status_code=302)
 
 
-# =========================
-# Admin Users
-# =========================
-@app.get("/admin/users", response_class=HTMLResponse)
-def admin_users(admin=Depends(require_admin), q: str = ""):
-    def _do():
-        conn = db_conn()
-        cur = conn.cursor()
-        if q.strip():
-            cur.execute(
-                "SELECT user_id, username, is_blocked, last_seen FROM users "
-                "WHERE CAST(user_id AS TEXT) LIKE ? OR username LIKE ? "
-                "ORDER BY last_seen DESC LIMIT 50",
-                (f"%{q.strip()}%", f"%{q.strip()}%"),
-            )
-        else:
-            cur.execute("SELECT user_id, username, is_blocked, last_seen FROM users ORDER BY last_seen DESC LIMIT 50")
-        rows = cur.fetchall()
-        conn.close()
-        return rows
-
-    rows = []
-    try:
-        rows = _retry_sqlite(_do)
-    except Exception:
-        rows = []
-
-    trs = ""
-    for r in rows:
-        uid = r["user_id"]
-        uname = r["username"] or "-"
-        blocked = "🚫" if int(r["is_blocked"] or 0) == 1 else "✅"
-        last_seen = r["last_seen"] or "-"
-        trs += (
-            "<tr>"
-            f"<td>{blocked}</td>"
-            f"<td><a class='btn ghost' href='/admin/user/{uid}'>👤 {uid}</a></td>"
-            f"<td>@{html_escape(uname)}</td>"
-            f"<td>{html_escape(last_seen)}</td>"
-            "</tr>"
-        )
-
-    body = f"""
-    <div class="card">
-      <div class="row">
-        <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
-      </div>
-      <div class="hr"></div>
-      <form method="get" action="/admin/users">
-        <label class="muted">Buscar</label>
-        <input name="q" value="{html_escape(q or '')}" placeholder="Ej: 1915349159 o yudith"/>
-        <div style="height:12px;"></div>
-        <button class="btn" type="submit">Buscar</button>
-      </form>
-    </div>
-
-    <div class="card">
-      <table>
-        <tr><th>Estado</th><th>ID</th><th>Username</th><th>Last seen</th></tr>
-        {trs or "<tr><td colspan='4' class='muted'>Sin resultados</td></tr>"}
-      </table>
-    </div>
-    """
-    return page("Admin • Usuarios", body, subtitle="Gestión")
-
-
-@app.get("/admin/user/{user_id}", response_class=HTMLResponse)
-def admin_user_detail(user_id: int, admin=Depends(require_admin)):
-    def _do():
-        conn = db_conn()
-        cur = conn.cursor()
-
-        cur.execute(
-            "SELECT user_id, username, is_blocked, created_at, last_seen FROM users WHERE user_id=?",
-            (user_id,),
-        )
-        u = cur.fetchone()
-
-        cur.execute(
-            "SELECT id, ip, vence, estado FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 50",
-            (user_id,),
-        )
-        proxies_rows = cur.fetchall()
-
-        # ✅ IMPORTANTE: aquí incluimos voucher_path también
-        cur.execute(
-            """
-            SELECT id, tipo, ip, cantidad, monto, estado, created_at, voucher_path
-            FROM requests
-            WHERE user_id=?
-            ORDER BY id DESC
-            LIMIT 50
-            """,
-            (user_id,),
-        )
-        req_rows = cur.fetchall()
-
-        conn.close()
-        return u, proxies_rows, req_rows
-
-    u, proxies_rows, req_rows = None, [], []
-    try:
-        u, proxies_rows, req_rows = _retry_sqlite(_do)
-    except Exception:
-        pass
-
-    if not u:
-        return nice_error_page("Usuario", "No encontré ese usuario.", "/admin/users", "⬅️ Volver")
-
-    uname = u["username"] or "-"
-    blocked = int(u["is_blocked"] or 0)
-    tag = "🚫 BLOQUEADO" if blocked == 1 else "✅ ACTIVO"
-
-    # ---- Proxies table ----
-    phtml = ""
-    for r in proxies_rows:
-        phtml += (
-            f"<tr>"
-            f"<td>{r['id']}</td>"
-            f"<td>{html_escape(r['ip'] or '')}</td>"
-            f"<td>{html_escape(r['vence'] or '')}</td>"
-            f"<td>{html_escape(r['estado'] or '')}</td>"
-            f"</tr>"
-        )
-    if not phtml:
-        phtml = "<tr><td colspan='4' class='muted'>Sin proxies</td></tr>"
-
-    # ---- Pedidos table (FIX: req_rows + indent correcto) ----
-    ohtml = ""
-    for r in req_rows:
-        voucher = (r["voucher_path"] or "").strip()
-        voucher_cell = f"<a href='/static/{html_escape(voucher)}' target='_blank'>ver</a>" if voucher else "-"
-
-        ohtml += "<tr>"
-        ohtml += f"<td>#{r['id']}</td>"
-        ohtml += f"<td>{html_escape(r['tipo'] or '')}</td>"
-        ohtml += f"<td>{html_escape(r['ip'] or '-')}</td>"
-        ohtml += f"<td>{int(r['cantidad'] or 0)}</td>"
-        ohtml += f"<td>{html_escape(str(r['monto'] or '0'))}</td>"
-        ohtml += f"<td>{html_escape(r['estado'] or '')}</td>"
-        ohtml += f"<td>{html_escape(r['created_at'] or '')}</td>"
-        ohtml += f"<td>{voucher_cell}</td>"
-        ohtml += "</tr>"
-
-    if not ohtml:
-        ohtml = "<tr><td colspan='8' class='muted'>No hay pedidos</td></tr>"
-
-    toggle_label = "🔓 Desbloquear" if blocked == 1 else "⛔ Bloquear"
-    toggle_class = "btn" if blocked == 1 else "btn bad"
-
-    body = f"""
-    <div class="card">
-      <div class="row">
-        <a class="btn ghost" href="/admin/users">⬅️ Usuarios</a>
-        <a class="btn ghost" href="/admin">🏠 Dashboard</a>
-
-        <form method="post" action="/admin/user/{user_id}/toggle_block" style="margin-left:auto;">
-          <button class="{toggle_class}" type="submit">{toggle_label}</button>
-        </form>
-      </div>
-
-      <div class="hr"></div>
-      <div class="muted">Usuario</div>
-      <div class="kpi">{user_id}</div>
-      <p class="muted">@{html_escape(uname)} • {tag}</p>
-    </div>
-
-    <div class="card">
-      <h3 style="margin:0 0 10px 0;">📦 Proxies</h3>
-      <table>
-        <tr><th>PID</th><th>IP</th><th>Vence</th><th>Estado</th></tr>
-        {phtml}
-      </table>
-    </div>
-
-    <div class="card">
-      <h3 style="margin:0 0 10px 0;">📨 Pedidos</h3>
-      <table>
-        <tr><th>ID</th><th>Tipo</th><th>IP</th><th>Qty</th><th>Monto</th><th>Estado</th><th>Creado</th><th>Voucher</th></tr>
-        {ohtml}
-      </table>
-    </div>
-    """
-    return page(f"Admin • Usuario {user_id}", body, subtitle="Detalle")
-
-def _deliver_buy_only_count(qty: int) -> bool:
-    # tu nuevo stock es SOLO contador
-    try:
-        stock = int(float(get_setting("stock_available", "0") or 0))
-    except Exception:
-        stock = 0
-    if stock < qty:
-        return False
-    set_setting("stock_available", str(stock - qty))
-    return True
-
-
-def _deliver_renew_extend(conn: sqlite3.Connection, user_id: int, proxy_id: int, dias: int):
-    cur = conn.cursor()
-    cur.execute("SELECT id, vence FROM proxies WHERE id=? AND user_id=?", (int(proxy_id), int(user_id)))
-    p = cur.fetchone()
-    if not p:
-        raise HTTPException(400, "No encontré ese proxy para renovar.")
-    v_old = parse_dt(p["vence"] or "") or datetime.now()
-    base = v_old if v_old > datetime.now() else datetime.now()
-    v_new = base + timedelta(days=dias)
-    cur.execute("UPDATE proxies SET vence=? WHERE id=?", (fmt_dt(v_new), int(proxy_id)))
-
-
-def _deliver_claim_add_proxy(conn: sqlite3.Connection, user_id: int, note: str):
-    # note guarda JSON con raw/ip/vence
-    try:
-        payload = json.loads(note or "{}")
-    except Exception:
-        payload = {}
-
-    raw = (payload.get("raw") or "").strip()
-    ip = (payload.get("ip") or "").strip()
-    vence = (payload.get("vence") or "").strip()
-
-    if not raw and not ip:
-        raise HTTPException(400, "La solicitud no tiene proxy válido.")
-    if not ip and raw:
-        # intentar inferir
-        first = raw.splitlines()[0].strip() if raw else ""
-        ip = first.replace("http://", "").replace("https://", "").split()[0]
-
-    start = datetime.now()
-    if vence:
-        vdt = parse_dt(vence) or (start + timedelta(days=int(float(get_setting("dias_proxy", "30") or 30))))
-    else:
-        vdt = start + timedelta(days=int(float(get_setting("dias_proxy", "30") or 30)))
-
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO proxies(user_id,ip,inicio,vence,estado,raw) VALUES(?,?,?,?,?,?)",
-        (int(user_id), ip, fmt_dt(start), fmt_dt(vdt), "active", raw or ip),
-    )
-
-
-@app.post("/admin/order/{rid}/approve")
-def admin_order_approve(rid: int, admin=Depends(require_admin)):
-    # FIX: transacción corta + retry
-    dias = int(float(get_setting("dias_proxy", str(DEFAULT_DIAS_PROXY)) or DEFAULT_DIAS_PROXY))
-    if dias > 30:
-        dias = 30
-    if dias <= 0:
-        dias = DEFAULT_DIAS_PROXY
-
-    def _do():
-        conn = db_conn()
-        cur = conn.cursor()
-
-        cur.execute(
-            "SELECT id, user_id, tipo, cantidad, estado, target_proxy_id, note FROM requests WHERE id=?",
-            (int(rid),),
-        )
-        req = cur.fetchone()
-        if not req:
-            conn.close()
-            raise HTTPException(404, "Pedido no encontrado")
-
-        tipo = (req["tipo"] or "").strip()
-        uid = int(req["user_id"])
-        qty = int(req["cantidad"] or 1)
-        target_proxy_id = int(req["target_proxy_id"] or 0)
-        note = (req["note"] or "").strip()
-
-        # entrega según tipo
-        if tipo == "buy":
-            ok = _deliver_buy_only_count(max(1, qty))
-            if not ok:
-                conn.close()
-                raise HTTPException(400, "Stock insuficiente para aprobar esta compra.")
-            notify_user(uid, f"✅ Tu compra fue aprobada. Proxies: {max(1, qty)}. (Stock actualizado)")
-        elif tipo == "renew":
-            if target_proxy_id <= 0:
-                conn.close()
-                raise HTTPException(400, "Renovación sin Proxy ID.")
-            _deliver_renew_extend(conn, uid, target_proxy_id, dias)
-            notify_user(uid, f"✅ Renovación aprobada. Proxy #{target_proxy_id} extendida {dias} días.")
-        elif tipo == "claim":
-            _deliver_claim_add_proxy(conn, uid, note)
-            notify_user(uid, "✅ Tu proxy existente fue verificada y agregada a tu cuenta.")
-        else:
-            notify_user(uid, "✅ Tu pedido fue aprobado.")
-
-        # marcar aprobado
-        cur.execute("UPDATE requests SET estado=? WHERE id=?", ("approved", int(rid)))
-        conn.commit()
-        conn.close()
-        admin_log("order_approve", json.dumps({"rid": rid, "tipo": tipo, "uid": uid}, ensure_ascii=False))
-
-    _retry_sqlite(_do)
-    return RedirectResponse(url="/admin/orders", status_code=302)
-
-
-@app.post("/admin/order/{rid}/reject")
-def admin_order_reject(rid: int, admin=Depends(require_admin)):
-    def _do():
-        conn = db_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT id, user_id, tipo FROM requests WHERE id=?", (int(rid),))
-        req = cur.fetchone()
-        if not req:
-            conn.close()
-            raise HTTPException(404, "Pedido no encontrado")
-
-        cur.execute("UPDATE requests SET estado=? WHERE id=?", ("rejected", int(rid)))
-        conn.commit()
-        conn.close()
-
-        uid = int(req["user_id"])
-        notify_user(uid, f"❌ Tu pedido #{rid} fue rechazado. Si necesitas ayuda, abre un ticket en soporte.")
-        admin_log("order_reject", json.dumps({"rid": rid, "uid": uid}, ensure_ascii=False))
-
-    _retry_sqlite(_do)
-    return RedirectResponse(url="/admin/orders", status_code=302)
-
-
-# =========================
-# Admin Proxies
-# =========================
-@app.get("/admin/proxies", response_class=HTMLResponse)
-def admin_proxies(admin=Depends(require_admin), q: str = ""):
-    def _do():
-        conn = db_conn()
-        cur = conn.cursor()
-        if q.strip():
-            cur.execute(
-                """
-                SELECT id, user_id, ip, vence, estado
-                FROM proxies
-                WHERE CAST(user_id AS TEXT) LIKE ? OR ip LIKE ?
-                ORDER BY id DESC
-                LIMIT 120
-                """,
-                (f"%{q.strip()}%", f"%{q.strip()}%"),
-            )
-        else:
-            cur.execute("SELECT id, user_id, ip, vence, estado FROM proxies ORDER BY id DESC LIMIT 120")
-        rows = cur.fetchall()
-        conn.close()
-        return rows
-
-    rows = _retry_sqlite(_do)
-
-    trs = ""
-    for r in rows:
-        trs += (
-            "<tr>"
-            f"<td><code>{r['id']}</code></td>"
-            f"<td><a class='btn ghost' href='/admin/user/{int(r['user_id'])}'>👤 {int(r['user_id'])}</a></td>"
-            f"<td>{html_escape(r['ip'] or '')}</td>"
-            f"<td>{html_escape(r['vence'] or '')}</td>"
-            f"<td>{html_escape(r['estado'] or '')}</td>"
-            "</tr>"
-        )
-
-    body = f"""
-    <div class="card">
-      <div class="row">
-        <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
-      </div>
-      <div class="hr"></div>
-
-      <form method="get" action="/admin/proxies">
-        <label class="muted">Buscar</label>
-        <input name="q" value="{html_escape(q or '')}" placeholder="user_id o ip"/>
-        <div style="height:12px;"></div>
-        <button class="btn" type="submit">Buscar</button>
-      </form>
-    </div>
-
-    <div class="card">
-      <table>
-        <tr><th>PID</th><th>User</th><th>IP</th><th>Vence</th><th>Estado</th></tr>
-        {trs or "<tr><td colspan='5' class='muted'>No hay proxies</td></tr>"}
-      </table>
-    </div>
-    """
-    return page("Admin • Proxies", body, subtitle="Listado")
-
-
-# =========================
-# Admin Tickets
-# =========================
-@app.get("/admin/tickets", response_class=HTMLResponse)
-def admin_tickets(admin=Depends(require_admin), state: str = "open"):
-    state = (state or "open").strip()
-
-    def _do():
-        conn = db_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT id,user_id,subject,message,admin_reply,status,created_at,updated_at "
-            "FROM tickets WHERE status=? ORDER BY id DESC LIMIT 120",
-            (state,),
-        )
-        rows = cur.fetchall()
-        conn.close()
-        return rows
-
-    rows = _retry_sqlite(_do)
-
-    cards = ""
-    for t in rows:
-        cards += f"""
-        <div class="card" style="margin-bottom:12px;">
-          <div class="muted">Ticket <b>#{t['id']}</b> • Usuario <b>{t['user_id']}</b> • Estado: <b>{html_escape(t['status'])}</b></div>
-          <div style="height:8px;"></div>
-          <div><b>{html_escape(t['subject'] or 'Soporte')}</b></div>
-          <pre>{html_escape(t['message'] or '')}</pre>
-          <div class="hr"></div>
-          <form method="post" action="/admin/ticket/{int(t['id'])}/reply">
-            <label class="muted">Respuesta</label>
-            <textarea name="reply" placeholder="Escribe respuesta...">{html_escape(t['admin_reply'] or '')}</textarea>
-            <div style="height:12px;"></div>
-            <div class="row">
-              <button class="btn" type="submit" name="action" value="reply">📩 Guardar respuesta</button>
-              <button class="btn ghost" type="submit" name="action" value="close">✅ Cerrar</button>
-            </div>
-          </form>
-        </div>
-        """
-
-    if not cards:
-        cards = "<div class='card'><p class='muted'>No hay tickets en este estado.</p></div>"
-
-    body = f"""
-    <div class="card hero">
-      <h1>💬 Tickets</h1>
-      <p>Responde y cierra tickets de soporte.</p>
-      <div class="hr"></div>
-      <div class="row">
-        <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
-        <a class="btn ghost" href="/admin/tickets?state=open">Abiertos</a>
-        <a class="btn ghost" href="/admin/tickets?state=closed">Cerrados</a>
-      </div>
-    </div>
-    {cards}
-    """
-    return page("Admin • Tickets", body, subtitle="Soporte")
-
-
-@app.post("/admin/ticket/{tid}/reply")
-def admin_ticket_reply(tid: int, reply: str = Form(""), action: str = Form("reply"), admin=Depends(require_admin)):
-    reply = (reply or "").strip()
-
-    def _do():
-        conn = db_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT id,user_id FROM tickets WHERE id=?", (int(tid),))
-        t = cur.fetchone()
-        if not t:
-            conn.close()
-            raise HTTPException(404, "Ticket no encontrado")
-
-        if action == "close":
-            cur.execute("UPDATE tickets SET status='closed', updated_at=? WHERE id=?", (now_str(), int(tid)))
-            conn.commit()
-            conn.close()
-            notify_user(int(t["user_id"]), f"✅ Tu ticket #{tid} fue cerrado. Si necesitas más ayuda, abre otro.")
-            admin_log("ticket_close", json.dumps({"tid": tid}, ensure_ascii=False))
-            return
-
-        cur.execute("UPDATE tickets SET admin_reply=?, status='answered', updated_at=? WHERE id=?", (reply, now_str(), int(tid)))
-        conn.commit()
-        conn.close()
-        if reply:
-            notify_user(int(t["user_id"]), f"💬 Soporte respondió tu ticket #{tid}. Entra a Soporte para verlo.")
-        admin_log("ticket_reply", json.dumps({"tid": tid}, ensure_ascii=False))
-
-    _retry_sqlite(_do)
-    return RedirectResponse(url="/admin/tickets?state=open", status_code=302)
-
-
-# =========================
-# Admin Reset / Limpieza
-# =========================
 @app.get("/admin/reset", response_class=HTMLResponse)
 def admin_reset_page(admin=Depends(require_admin)):
     body = """
-    <div class="card hero">
-      <h1>🧹 Reset / Limpieza</h1>
-      <p>Esto borra datos del panel web. Úsalo con cuidado.</p>
-      <div class="hr"></div>
-      <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
-    </div>
-
     <div class="card">
-      <form method="post" action="/admin/reset">
-        <label class="muted">Qué deseas limpiar</label>
-        <div style="height:8px;"></div>
+      <div class="row">
+        <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
+      </div>
+      <div class="hr"></div>
 
+      <div class="kpi">🧹 Reset / Limpieza</div>
+      <p class="muted">Esto borra datos del panel web. Úsalo con cuidado.</p>
+
+      <div class="hr"></div>
+      <form method="post" action="/admin/reset">
         <label><input type="checkbox" name="wipe_requests" value="1"/> Pedidos (requests)</label><br/>
         <label><input type="checkbox" name="wipe_tickets" value="1"/> Tickets</label><br/>
         <label><input type="checkbox" name="wipe_notifications" value="1"/> Notificaciones</label><br/>
         <label><input type="checkbox" name="wipe_stock" value="1"/> Stock (contador)</label><br/>
-        <label><input type="checkbox" name="wipe_proxies" value="1"/> Proxies (MUY PELIGROSO)</label><br/>
+        <label><input type="checkbox" name="wipe_proxies" value="1"/> Proxies (PELIGROSO)</label><br/>
 
         <div class="hr"></div>
         <label class="muted">Escribe: <b>CONFIRMAR</b></label>
@@ -1733,7 +1083,8 @@ def admin_reset_do(
         cur = conn.cursor()
 
         if wipe_requests == "1":
-            cur.execute("DELETE FROM requests")
+            try: cur.execute("DELETE FROM requests")
+            except Exception: pass
 
         if wipe_tickets == "1":
             cur.execute("DELETE FROM tickets")
@@ -1745,7 +1096,8 @@ def admin_reset_do(
             cur.execute("UPDATE settings SET value=?, updated_at=? WHERE key='stock_available'", ("0", now_str()))
 
         if wipe_proxies == "1":
-            cur.execute("DELETE FROM proxies")
+            try: cur.execute("DELETE FROM proxies")
+            except Exception: pass
 
         conn.commit()
         conn.close()
@@ -1763,21 +1115,617 @@ def admin_reset_do(
 
 
 # =========================
-# CLIENT: Signup / Verify / Login / Reset password
+# ADMIN: USERS
+# =========================
+@app.get("/admin/users", response_class=HTMLResponse)
+def admin_users(admin=Depends(require_admin), q: str = ""):
+    q = (q or "").strip()
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        rows = []
+        try:
+            if q:
+                cur.execute(
+                    "SELECT user_id, username, is_blocked, last_seen FROM users "
+                    "WHERE CAST(user_id AS TEXT) LIKE ? OR username LIKE ? "
+                    "ORDER BY last_seen DESC LIMIT 80",
+                    (f"%{q}%", f"%{q}%"),
+                )
+            else:
+                cur.execute("SELECT user_id, username, is_blocked, last_seen FROM users ORDER BY last_seen DESC LIMIT 80")
+            rows = cur.fetchall()
+        except Exception:
+            rows = []
+        conn.close()
+        return rows
+
+    rows = _retry_sqlite(_do)
+
+    trs = ""
+    for r in rows:
+        uid = int(r["user_id"])
+        uname = r["username"] or "-"
+        blocked = "🚫" if int(r["is_blocked"] or 0) == 1 else "✅"
+        last_seen = r["last_seen"] or "-"
+        trs += (
+            "<tr>"
+            f"<td>{blocked}</td>"
+            f"<td><a class='btn ghost' href='/admin/user/{uid}'>👤 {uid}</a></td>"
+            f"<td>@{html_escape(uname)}</td>"
+            f"<td>{html_escape(last_seen)}</td>"
+            "</tr>"
+        )
+
+    body = f"""
+    <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
+      </div>
+      <div class="hr"></div>
+
+      <form method="get" action="/admin/users">
+        <label class="muted">Buscar</label>
+        <input name="q" value="{html_escape(q)}" placeholder="Ej: 1915349159 o yudith"/>
+        <div style="height:12px;"></div>
+        <button class="btn" type="submit">Buscar</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <table>
+        <tr><th>Estado</th><th>ID</th><th>Username</th><th>Last seen</th></tr>
+        {trs or "<tr><td colspan='4' class='muted'>Sin resultados</td></tr>"}
+      </table>
+    </div>
+    """
+    return page("Admin • Usuarios", body, subtitle="Gestión")
+
+
+@app.post("/admin/user/{user_id}/toggle_block")
+def admin_user_toggle_block(user_id: int, admin=Depends(require_admin)):
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT is_blocked FROM users WHERE user_id=?", (int(user_id),))
+        r = cur.fetchone()
+        if not r:
+            conn.close()
+            raise HTTPException(404, "Usuario no encontrado")
+        blocked = int(r["is_blocked"] or 0)
+        newv = 0 if blocked == 1 else 1
+        cur.execute("UPDATE users SET is_blocked=? WHERE user_id=?", (newv, int(user_id)))
+        conn.commit()
+        conn.close()
+        return newv
+
+    newv = _retry_sqlite(_do)
+    admin_log("user_toggle_block", json.dumps({"user_id": user_id, "is_blocked": newv}, ensure_ascii=False))
+    return RedirectResponse(url=f"/admin/user/{int(user_id)}", status_code=302)
+
+
+@app.get("/admin/user/{user_id}", response_class=HTMLResponse)
+def admin_user_detail(user_id: int, admin=Depends(require_admin)):
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+
+        u = None
+        try:
+            cur.execute("SELECT user_id, username, is_blocked, created_at, last_seen FROM users WHERE user_id=?", (int(user_id),))
+            u = cur.fetchone()
+        except Exception:
+            u = None
+
+        proxies_rows = []
+        try:
+            cur.execute("SELECT id, ip, vence, estado FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 50", (int(user_id),))
+            proxies_rows = cur.fetchall()
+        except Exception:
+            proxies_rows = []
+
+        req_rows = []
+        try:
+            cur.execute(
+                "SELECT id, tipo, ip, cantidad, monto, estado, created_at, voucher_path "
+                "FROM requests WHERE user_id=? ORDER BY id DESC LIMIT 50",
+                (int(user_id),),
+            )
+            req_rows = cur.fetchall()
+        except Exception:
+            req_rows = []
+
+        conn.close()
+        return u, proxies_rows, req_rows
+
+    u, proxies_rows, req_rows = _retry_sqlite(_do)
+
+    if not u:
+        return nice_error_page("Usuario", "No encontré ese usuario.", "/admin/users", "⬅️ Volver")
+
+    uname = u["username"] or "-"
+    blocked = int(u["is_blocked"] or 0)
+    tag = "🚫 BLOQUEADO" if blocked == 1 else "✅ ACTIVO"
+
+    phtml = ""
+    for r in proxies_rows:
+        phtml += (
+            "<tr>"
+            f"<td>{int(r['id'])}</td>"
+            f"<td>{html_escape(r['ip'] or '')}</td>"
+            f"<td>{html_escape(r['vence'] or '')}</td>"
+            f"<td>{html_escape(r['estado'] or '')}</td>"
+            "</tr>"
+        )
+    if not phtml:
+        phtml = "<tr><td colspan='4' class='muted'>Sin proxies</td></tr>"
+
+    ohtml = ""
+    for r in req_rows:
+        voucher = (r["voucher_path"] or "").strip()
+        voucher_cell = f"<a href='/static/{html_escape(voucher)}' target='_blank'>ver</a>" if voucher else "-"
+        ohtml += (
+            "<tr>"
+            f"<td>#{int(r['id'])}</td>"
+            f"<td>{html_escape(r['tipo'] or '')}</td>"
+            f"<td>{html_escape(r['ip'] or '-')}</td>"
+            f"<td>{int(r['cantidad'] or 0)}</td>"
+            f"<td>{html_escape(str(r['monto'] or '0'))}</td>"
+            f"<td>{html_escape(r['estado'] or '')}</td>"
+            f"<td>{html_escape(r['created_at'] or '')}</td>"
+            f"<td>{voucher_cell}</td>"
+            "</tr>"
+        )
+    if not ohtml:
+        ohtml = "<tr><td colspan='8' class='muted'>No hay pedidos</td></tr>"
+
+    toggle_label = "🔓 Desbloquear" if blocked == 1 else "⛔ Bloquear"
+    toggle_class = "btn" if blocked == 1 else "btn bad"
+
+    body = f"""
+    <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/admin/users">⬅️ Usuarios</a>
+        <a class="btn ghost" href="/admin">🏠 Dashboard</a>
+
+        <form method="post" action="/admin/user/{int(user_id)}/toggle_block" style="margin-left:auto;">
+          <button class="{toggle_class}" type="submit">{toggle_label}</button>
+        </form>
+      </div>
+
+      <div class="hr"></div>
+      <div class="muted">Usuario</div>
+      <div class="kpi">{int(user_id)}</div>
+      <p class="muted">@{html_escape(uname)} • {tag}</p>
+    </div>
+
+    <div class="card">
+      <h3 style="margin:0 0 10px 0;">📦 Proxies</h3>
+      <table>
+        <tr><th>PID</th><th>IP</th><th>Vence</th><th>Estado</th></tr>
+        {phtml}
+      </table>
+    </div>
+
+    <div class="card">
+      <h3 style="margin:0 0 10px 0;">📨 Pedidos</h3>
+      <table>
+        <tr><th>ID</th><th>Tipo</th><th>IP</th><th>Qty</th><th>Monto</th><th>Estado</th><th>Creado</th><th>Voucher</th></tr>
+        {ohtml}
+      </table>
+    </div>
+    """
+    return page(f"Admin • Usuario {int(user_id)}", body, subtitle="Detalle")
+
+
+# =========================
+# ADMIN: ORDERS (LIST + APPROVE/REJECT)
+# =========================
+@app.get("/admin/orders", response_class=HTMLResponse)
+def admin_orders(admin=Depends(require_admin), state: str = ""):
+    state = (state or "").strip()
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        rows = []
+        try:
+            if state:
+                cur.execute(
+                    "SELECT id,user_id,tipo,ip,cantidad,monto,estado,created_at,voucher_path,target_proxy_id "
+                    "FROM requests WHERE estado=? ORDER BY id DESC LIMIT 160",
+                    (state,),
+                )
+            else:
+                cur.execute(
+                    "SELECT id,user_id,tipo,ip,cantidad,monto,estado,created_at,voucher_path,target_proxy_id "
+                    "FROM requests ORDER BY id DESC LIMIT 160"
+                )
+            rows = cur.fetchall()
+        except Exception:
+            rows = []
+        conn.close()
+        return rows
+
+    rows = _retry_sqlite(_do)
+
+    trs = ""
+    for r in rows:
+        voucher = (r["voucher_path"] or "").strip()
+        voucher_cell = f"<a href='/static/{html_escape(voucher)}' target='_blank'>ver</a>" if voucher else "-"
+        rid = int(r["id"])
+        uid = int(r["user_id"])
+        tipo = (r["tipo"] or "").strip()
+        extra = ""
+        if tipo == "renew" and int(r["target_proxy_id"] or 0) > 0:
+            extra = f" • Proxy #{int(r['target_proxy_id'])}"
+
+        approve_form = f"""
+          <form method="post" action="/admin/order/{rid}/approve" style="display:inline;">
+            <button class="btn" type="submit">✅ Aprobar</button>
+          </form>
+        """
+        reject_form = f"""
+          <form method="post" action="/admin/order/{rid}/reject" style="display:inline; margin-left:8px;">
+            <button class="btn bad" type="submit">❌ Rechazar</button>
+          </form>
+        """
+
+        trs += (
+            "<tr>"
+            f"<td>#{rid}</td>"
+            f"<td><a class='btn ghost' href='/admin/user/{uid}'>👤 {uid}</a></td>"
+            f"<td>{html_escape(tipo)}{html_escape(extra)}</td>"
+            f"<td>{html_escape(r['ip'] or '-')}</td>"
+            f"<td>{int(r['cantidad'] or 0)}</td>"
+            f"<td>{html_escape(str(r['monto'] or '0'))}</td>"
+            f"<td>{html_escape(r['estado'] or '')}</td>"
+            f"<td>{html_escape(r['created_at'] or '')}</td>"
+            f"<td>{voucher_cell}</td>"
+            f"<td>{approve_form}{reject_form}</td>"
+            "</tr>"
+        )
+
+    if not trs:
+        trs = "<tr><td colspan='10' class='muted'>No hay pedidos</td></tr>"
+
+    body = f"""
+    <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
+        <a class="btn ghost" href="/admin/orders">Todos</a>
+        <a class="btn ghost" href="/admin/orders?state=voucher_received">Voucher recibidos</a>
+        <a class="btn ghost" href="/admin/orders?state=awaiting_admin_verify">Claims</a>
+      </div>
+      <div class="hr"></div>
+
+      <table>
+        <tr>
+          <th>ID</th><th>User</th><th>Tipo</th><th>IP</th><th>Qty</th><th>Monto</th><th>Estado</th><th>Creado</th><th>Voucher</th><th>Acciones</th>
+        </tr>
+        {trs}
+      </table>
+    </div>
+    """
+    return page("Admin • Pedidos", body, subtitle="Aprobar / Rechazar")
+
+
+def _deliver_buy_only_count(qty: int) -> bool:
+    try:
+        stock = int(float(get_setting("stock_available", "0") or 0))
+    except Exception:
+        stock = 0
+    if stock < qty:
+        return False
+    set_setting("stock_available", str(stock - qty))
+    return True
+
+
+def _deliver_renew_extend(conn: sqlite3.Connection, user_id: int, proxy_id: int, dias: int):
+    cur = conn.cursor()
+    cur.execute("SELECT id, vence FROM proxies WHERE id=? AND user_id=?", (int(proxy_id), int(user_id)))
+    p = cur.fetchone()
+    if not p:
+        raise HTTPException(400, "No encontré ese proxy para renovar.")
+    v_old = parse_dt(p["vence"] or "") or datetime.now()
+    base = v_old if v_old > datetime.now() else datetime.now()
+    v_new = base + timedelta(days=dias)
+    cur.execute("UPDATE proxies SET vence=? WHERE id=?", (fmt_dt(v_new), int(proxy_id)))
+
+
+def _deliver_claim_add_proxy(conn: sqlite3.Connection, user_id: int, note: str):
+    try:
+        payload = json.loads(note or "{}")
+    except Exception:
+        payload = {}
+
+    raw = (payload.get("raw") or "").strip()
+    ip = (payload.get("ip") or "").strip()
+    vence = (payload.get("vence") or "").strip()
+
+    if not raw and not ip:
+        raise HTTPException(400, "La solicitud no tiene proxy válido.")
+
+    if not ip and raw:
+        first = raw.splitlines()[0].strip() if raw else ""
+        ip = first.replace("http://", "").replace("https://", "").split()[0]
+
+    start = datetime.now()
+    dias = int(float(get_setting("dias_proxy", "30") or 30))
+    if dias <= 0:
+        dias = 30
+    if dias > 30:
+        dias = 30
+
+    if vence:
+        vdt = parse_dt(vence) or (start + timedelta(days=dias))
+    else:
+        vdt = start + timedelta(days=dias)
+
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO proxies(user_id,ip,inicio,vence,estado,raw) VALUES(?,?,?,?,?,?)",
+        (int(user_id), ip, fmt_dt(start), fmt_dt(vdt), "active", raw or ip),
+    )
+
+
+@app.post("/admin/order/{rid}/approve")
+def admin_order_approve(rid: int, admin=Depends(require_admin)):
+    dias = int(float(get_setting("dias_proxy", str(DEFAULT_DIAS_PROXY)) or DEFAULT_DIAS_PROXY))
+    if dias > 30:
+        dias = 30
+    if dias <= 0:
+        dias = DEFAULT_DIAS_PROXY
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+
+        cur.execute("SELECT id, user_id, tipo, cantidad, target_proxy_id, note FROM requests WHERE id=?", (int(rid),))
+        req = cur.fetchone()
+        if not req:
+            conn.close()
+            raise HTTPException(404, "Pedido no encontrado")
+
+        tipo = (req["tipo"] or "").strip()
+        uid = int(req["user_id"])
+        qty = max(1, int(req["cantidad"] or 1))
+        target_proxy_id = int(req["target_proxy_id"] or 0)
+        note = (req["note"] or "").strip()
+
+        # IMPORTANTE: primero marcamos estado y hacemos entregas en la MISMA conexión,
+        # así reducimos locks.
+        if tipo == "buy":
+            ok = _deliver_buy_only_count(qty)
+            if not ok:
+                conn.close()
+                raise HTTPException(400, "Stock insuficiente para aprobar esta compra.")
+        elif tipo == "renew":
+            if target_proxy_id <= 0:
+                conn.close()
+                raise HTTPException(400, "Renovación sin Proxy ID.")
+            _deliver_renew_extend(conn, uid, target_proxy_id, dias)
+        elif tipo == "claim":
+            _deliver_claim_add_proxy(conn, uid, note)
+
+        cur.execute("UPDATE requests SET estado=? WHERE id=?", ("approved", int(rid)))
+        conn.commit()
+        conn.close()
+
+        # notificaciones fuera de la transacción (ya sin lock)
+        if tipo == "buy":
+            notify_user(uid, f"✅ Tu compra fue aprobada. Proxies: {qty}.")
+        elif tipo == "renew":
+            notify_user(uid, f"✅ Renovación aprobada. Proxy #{target_proxy_id} extendida {dias} días.")
+        elif tipo == "claim":
+            notify_user(uid, "✅ Tu proxy existente fue verificada y agregada a tu cuenta.")
+        else:
+            notify_user(uid, "✅ Tu pedido fue aprobado.")
+
+        admin_log("order_approve", json.dumps({"rid": rid, "tipo": tipo, "uid": uid}, ensure_ascii=False))
+
+    _retry_sqlite(_do)
+    return RedirectResponse(url="/admin/orders", status_code=302)
+
+
+@app.post("/admin/order/{rid}/reject")
+def admin_order_reject(rid: int, admin=Depends(require_admin)):
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT id, user_id FROM requests WHERE id=?", (int(rid),))
+        req = cur.fetchone()
+        if not req:
+            conn.close()
+            raise HTTPException(404, "Pedido no encontrado")
+
+        uid = int(req["user_id"])
+        cur.execute("UPDATE requests SET estado=? WHERE id=?", ("rejected", int(rid)))
+        conn.commit()
+        conn.close()
+
+        notify_user(uid, f"❌ Tu pedido #{rid} fue rechazado. Si necesitas ayuda, abre un ticket en soporte.")
+        admin_log("order_reject", json.dumps({"rid": rid, "uid": uid}, ensure_ascii=False))
+
+    _retry_sqlite(_do)
+    return RedirectResponse(url="/admin/orders", status_code=302)
+
+
+# =========================
+# ADMIN: PROXIES
+# =========================
+@app.get("/admin/proxies", response_class=HTMLResponse)
+def admin_proxies(admin=Depends(require_admin), q: str = ""):
+    q = (q or "").strip()
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        rows = []
+        try:
+            if q:
+                cur.execute(
+                    "SELECT id, user_id, ip, vence, estado FROM proxies "
+                    "WHERE CAST(user_id AS TEXT) LIKE ? OR ip LIKE ? "
+                    "ORDER BY id DESC LIMIT 200",
+                    (f"%{q}%", f"%{q}%"),
+                )
+            else:
+                cur.execute("SELECT id, user_id, ip, vence, estado FROM proxies ORDER BY id DESC LIMIT 200")
+            rows = cur.fetchall()
+        except Exception:
+            rows = []
+        conn.close()
+        return rows
+
+    rows = _retry_sqlite(_do)
+
+    trs = ""
+    for r in rows:
+        trs += (
+            "<tr>"
+            f"<td><code>{int(r['id'])}</code></td>"
+            f"<td><a class='btn ghost' href='/admin/user/{int(r['user_id'])}'>👤 {int(r['user_id'])}</a></td>"
+            f"<td>{html_escape(r['ip'] or '')}</td>"
+            f"<td>{html_escape(r['vence'] or '')}</td>"
+            f"<td>{html_escape(r['estado'] or '')}</td>"
+            "</tr>"
+        )
+
+    body = f"""
+    <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
+      </div>
+      <div class="hr"></div>
+
+      <form method="get" action="/admin/proxies">
+        <label class="muted">Buscar</label>
+        <input name="q" value="{html_escape(q)}" placeholder="user_id o ip"/>
+        <div style="height:12px;"></div>
+        <button class="btn" type="submit">Buscar</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <table>
+        <tr><th>PID</th><th>User</th><th>IP</th><th>Vence</th><th>Estado</th></tr>
+        {trs or "<tr><td colspan='5' class='muted'>No hay proxies</td></tr>"}
+      </table>
+    </div>
+    """
+    return page("Admin • Proxies", body, subtitle="Listado")
+
+
+# =========================
+# ADMIN: TICKETS
+# =========================
+@app.get("/admin/tickets", response_class=HTMLResponse)
+def admin_tickets(admin=Depends(require_admin), state: str = "open"):
+    state = (state or "open").strip()
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id,user_id,subject,message,admin_reply,status,created_at,updated_at "
+            "FROM tickets WHERE status=? ORDER BY id DESC LIMIT 120",
+            (state,),
+        )
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+
+    rows = _retry_sqlite(_do)
+
+    cards = ""
+    for t in rows:
+        cards += f"""
+        <div class="card" style="margin-bottom:12px;">
+          <div class="muted">Ticket <b>#{int(t['id'])}</b> • Usuario <b>{int(t['user_id'])}</b> • Estado: <b>{html_escape(t['status'])}</b></div>
+          <div style="height:8px;"></div>
+          <div><b>{html_escape(t['subject'] or 'Soporte')}</b></div>
+          <pre>{html_escape(t['message'] or '')}</pre>
+          <div class="hr"></div>
+          <form method="post" action="/admin/ticket/{int(t['id'])}/reply">
+            <label class="muted">Respuesta</label>
+            <textarea name="reply" placeholder="Escribe respuesta...">{html_escape(t['admin_reply'] or '')}</textarea>
+            <div style="height:12px;"></div>
+            <div class="row">
+              <button class="btn" type="submit" name="action" value="reply">📩 Guardar respuesta</button>
+              <button class="btn ghost" type="submit" name="action" value="close">✅ Cerrar</button>
+            </div>
+          </form>
+        </div>
+        """
+
+    if not cards:
+        cards = "<div class='card'><p class='muted'>No hay tickets en este estado.</p></div>"
+
+    body = f"""
+    <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
+        <a class="btn ghost" href="/admin/tickets?state=open">Abiertos</a>
+        <a class="btn ghost" href="/admin/tickets?state=answered">Respondidos</a>
+        <a class="btn ghost" href="/admin/tickets?state=closed">Cerrados</a>
+      </div>
+    </div>
+    {cards}
+    """
+    return page("Admin • Tickets", body, subtitle="Soporte")
+
+
+@app.post("/admin/ticket/{tid}/reply")
+def admin_ticket_reply(tid: int, reply: str = Form(""), action: str = Form("reply"), admin=Depends(require_admin)):
+    reply = (reply or "").strip()
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT id,user_id FROM tickets WHERE id=?", (int(tid),))
+        t = cur.fetchone()
+        if not t:
+            conn.close()
+            raise HTTPException(404, "Ticket no encontrado")
+
+        uid = int(t["user_id"])
+
+        if action == "close":
+            cur.execute("UPDATE tickets SET status='closed', updated_at=? WHERE id=?", (now_str(), int(tid)))
+            conn.commit()
+            conn.close()
+            notify_user(uid, f"✅ Tu ticket #{tid} fue cerrado.")
+            admin_log("ticket_close", json.dumps({"tid": tid}, ensure_ascii=False))
+            return
+
+        cur.execute(
+            "UPDATE tickets SET admin_reply=?, status='answered', updated_at=? WHERE id=?",
+            (reply, now_str(), int(tid)),
+        )
+        conn.commit()
+        conn.close()
+
+        if reply:
+            notify_user(uid, f"💬 Soporte respondió tu ticket #{tid}. Entra a Soporte para verlo.")
+        admin_log("ticket_reply", json.dumps({"tid": tid}, ensure_ascii=False))
+
+    _retry_sqlite(_do)
+    return RedirectResponse(url="/admin/tickets?state=open", status_code=302)
+
+
+# =========================
+# CLIENT AUTH: SIGNUP / VERIFY / LOGIN / LOGOUT / RESET
 # =========================
 @app.get("/client/signup", response_class=HTMLResponse)
 def client_signup_page():
     body = """
     <div class="grid">
-      <div class="card hero">
-        <h1>Crear cuenta</h1>
-        <p>Regístrate con <b>Teléfono + Contraseña</b> y define un <b>PIN de recuperación</b> para resetear tu clave.</p>
-        <div class="hr"></div>
-        <div class="pill">📱 Teléfono</div>
-        <div class="pill" style="margin-left:8px;">🔒 Contraseña</div>
-        <div class="pill" style="margin-left:8px;">🔑 PIN recuperación</div>
+      <div class="card">
+        <div class="kpi">Crear cuenta</div>
+        <p class="muted">Regístrate con Teléfono + Contraseña y define un PIN de recuperación.</p>
       </div>
-
       <div class="card">
         <form method="post" action="/client/signup">
           <label class="muted">Teléfono</label>
@@ -1789,13 +1737,12 @@ def client_signup_page():
           <div style="height:12px;"></div>
 
           <label class="muted">PIN de recuperación (4-6 dígitos)</label>
-          <input name="recovery_pin" placeholder="Ej: 1234" />
+          <input name="recovery_pin" placeholder="Ej: 1234"/>
           <div style="height:12px;"></div>
 
           <button class="btn" type="submit">Crear cuenta</button>
           <a class="btn ghost" href="/client/login" style="margin-left:10px;">🔐 Login</a>
         </form>
-
         <div class="hr"></div>
         <p class="muted">¿Olvidaste tu clave? <a href="/client/reset" style="color:white;">Resetear contraseña</a></p>
       </div>
@@ -1824,15 +1771,17 @@ def client_signup(phone: str = Form(...), password: str = Form(...), recovery_pi
         if cur.fetchone():
             conn.close()
             raise HTTPException(400, "Ese teléfono ya existe.")
+
         pwd_hash = password_make_hash(password)
         rec_hash = pin_hash(recovery_pin, PIN_SECRET)
+
         cur.execute(
-            "INSERT INTO accounts(phone,password_hash,recovery_pin_hash,verified,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            "INSERT INTO accounts(phone,password_hash,recovery_pin_hash,verified,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?)",
             (phone, pwd_hash, rec_hash, 0, now_str(), now_str()),
         )
         conn.commit()
 
-        # PIN verificación (6 dígitos)
         pin = _pin_gen(6)
         exp = _time_plus_minutes(5)
         cur.execute(
@@ -1849,13 +1798,8 @@ def client_signup(phone: str = Form(...), password: str = Form(...), recovery_pi
         return nice_error_page("Cuenta existente", "Ese teléfono ya está registrado. Inicia sesión.", "/client/login", "🔐 Login")
 
     body = f"""
-    <div class="card hero">
-      <h1>✅ Cuenta creada</h1>
-      <p>Ahora confirma tu cuenta escribiendo el PIN:</p>
-    </div>
-
     <div class="card pinbox">
-      <div class="muted">Tu PIN (una sola vez)</div>
+      <div class="muted">Tu PIN de verificación (una sola vez)</div>
       <div class="kpi" style="letter-spacing:6px;">{html_escape(pin)}</div>
       <p class="muted">Expira: <b>{html_escape(exp)}</b></p>
     </div>
@@ -1883,7 +1827,8 @@ def client_verify(phone: str = Form(...), pin: str = Form(...)):
         conn = db_conn()
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, pin_hash, expires_at, attempts FROM signup_pins WHERE phone=? AND estado='pending' ORDER BY id DESC LIMIT 1",
+            "SELECT id, pin_hash, expires_at, attempts FROM signup_pins "
+            "WHERE phone=? AND estado='pending' ORDER BY id DESC LIMIT 1",
             (phone,),
         )
         row = cur.fetchone()
@@ -1931,27 +1876,17 @@ def client_verify(phone: str = Form(...), pin: str = Form(...)):
     if status == "bad":
         return nice_error_page("PIN incorrecto", f"PIN incorrecto. Intentos: {extra}/3", "/client/signup", "↩️ Volver")
 
-    body = """
-    <div class="card hero">
-      <h1>✅ Cuenta verificada</h1>
-      <p>Ya puedes iniciar sesión.</p>
-      <div class="hr"></div>
-      <a class="btn" href="/client/login">🔐 Iniciar sesión</a>
-      <a class="btn ghost" href="/">🏠 Inicio</a>
-    </div>
-    """
-    return page("Cliente • Verificado", body, subtitle="Listo")
+    return nice_error_page("Cuenta verificada", "Ya puedes iniciar sesión.", "/client/login", "🔐 Iniciar sesión")
 
 
 @app.get("/client/login", response_class=HTMLResponse)
 def client_login_page():
     body = """
     <div class="grid">
-      <div class="card hero">
-        <h1>Panel Cliente</h1>
-        <p>Entra con tu <b>Teléfono + Contraseña</b>.</p>
+      <div class="card">
+        <div class="kpi">Panel Cliente</div>
+        <p class="muted">Entra con tu Teléfono + Contraseña.</p>
       </div>
-
       <div class="card">
         <form method="post" action="/client/login">
           <label class="muted">Teléfono</label>
@@ -1965,7 +1900,6 @@ def client_login_page():
           <button class="btn" type="submit">Entrar</button>
           <a class="btn ghost" href="/client/signup" style="margin-left:10px;">✨ Crear cuenta</a>
         </form>
-
         <div class="hr"></div>
         <p class="muted">¿Olvidaste tu clave? <a href="/client/reset" style="color:white;">Resetear contraseña</a></p>
       </div>
@@ -2015,14 +1949,13 @@ def client_logout():
     return resp
 
 
-# ====== Reset password (PIN recuperación) ======
 @app.get("/client/reset", response_class=HTMLResponse)
 def client_reset_page():
     body = """
     <div class="grid">
-      <div class="card hero">
-        <h1>🔑 Resetear contraseña</h1>
-        <p>Usa tu <b>PIN de recuperación</b> creado al registrarte.</p>
+      <div class="card">
+        <div class="kpi">🔑 Resetear contraseña</div>
+        <p class="muted">Usa tu PIN de recuperación creado al registrarte.</p>
       </div>
 
       <div class="card">
@@ -2074,7 +2007,10 @@ def client_reset_submit(phone: str = Form(...), recovery_pin: str = Form(...), n
             conn.close()
             return False
 
-        cur.execute("UPDATE accounts SET password_hash=?, updated_at=? WHERE phone=?", (password_make_hash(new_password), now_str(), phone))
+        cur.execute(
+            "UPDATE accounts SET password_hash=?, updated_at=? WHERE phone=?",
+            (password_make_hash(new_password), now_str(), phone),
+        )
         conn.commit()
         conn.close()
         return True
@@ -2087,7 +2023,7 @@ def client_reset_submit(phone: str = Form(...), recovery_pin: str = Form(...), n
 
 
 # =========================
-# Client portal
+# CLIENT PANEL: /me (SINGLE, FIXED)
 # =========================
 @app.get("/me", response_class=HTMLResponse)
 def client_me(client=Depends(require_client)):
@@ -2101,17 +2037,27 @@ def client_me(client=Depends(require_client)):
     def _do():
         conn = db_conn()
         cur = conn.cursor()
+
         cur.execute("SELECT COUNT(*) FROM notifications WHERE user_id=? AND seen=0", (uid,))
         unread = int(cur.fetchone()[0])
 
-        cur.execute("SELECT id, ip, inicio, vence, estado, raw FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 10", (uid,))
-        proxies_rows = cur.fetchall()
+        proxies_rows = []
+        try:
+            cur.execute("SELECT id, ip, inicio, vence, estado, raw FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 10", (uid,))
+            proxies_rows = cur.fetchall()
+        except Exception:
+            proxies_rows = []
 
-        cur.execute(
-            "SELECT id, tipo, ip, cantidad, monto, estado, created_at, voucher_path FROM requests WHERE user_id=? ORDER BY id DESC LIMIT 20",
-            (uid,),
-        )
-        orders_rows = cur.fetchall()
+        orders_rows = []
+        try:
+            cur.execute(
+                "SELECT id, tipo, ip, cantidad, monto, estado, created_at, voucher_path "
+                "FROM requests WHERE user_id=? ORDER BY id DESC LIMIT 20",
+                (uid,),
+            )
+            orders_rows = cur.fetchall()
+        except Exception:
+            orders_rows = []
 
         conn.close()
         return unread, proxies_rows, orders_rows
@@ -2130,7 +2076,7 @@ def client_me(client=Depends(require_client)):
 
         phtml += f"""
         <div class="card">
-          <div class="muted">Proxy ID {r['id']} • {html_escape(r['estado'] or '')} • {countdown}</div>
+          <div class="muted">Proxy ID {int(r['id'])} • {html_escape(r['estado'] or '')} • {countdown}</div>
           <div style="height:6px;"></div>
           <div><b>{html_escape(r['ip'] or '')}</b></div>
           <div class="muted">Inicio: {html_escape(r['inicio'] or '')} • Vence: {html_escape(vence)}</div>
@@ -2145,24 +2091,34 @@ def client_me(client=Depends(require_client)):
     if not phtml:
         phtml = "<div class='card'><p class='muted'>No tienes proxies todavía.</p></div>"
 
+    # FIX REAL: ohtml construido correctamente (sin syntax error)
     ohtml = ""
     for r in orders_rows:
         voucher = (r["voucher_path"] or "").strip()
         voucher_cell = f"<a href='/static/{html_escape(voucher)}' target='_blank'>ver</a>" if voucher else "-"
-        ohtml += "<tr>"
+        ohtml += (
+            "<tr>"
+            f"<td>#{int(r['id'])}</td>"
+            f"<td>{html_escape(r['tipo'] or '')}</td>"
+            f"<td>{html_escape(r['ip'] or '-')}</td>"
+            f"<td>{int(r['cantidad'] or 0)}</td>"
+            f"<td>{html_escape(str(r['monto'] or '0'))}</td>"
+            f"<td>{html_escape(r['estado'] or '')}</td>"
+            f"<td>{html_escape(r['created_at'] or '')}</td>"
+            f"<td>{voucher_cell}</td>"
+            "</tr>"
+        )
 
-
-      if not ohtml:
+    if not ohtml:
         ohtml = "<tr><td colspan='8' class='muted'>No hay pedidos</td></tr>"
 
-    # Botón de notificaciones (badge)
-    notif_badge = f"<span class='badge'>{unread}</span>" if unread > 0 else ""
+    notif_badge = f"<span class='badge'>{int(unread)}</span>" if int(unread) > 0 else ""
     notif_btn = f"🔔 Notificaciones {notif_badge}"
 
     body = f"""
-    <div class="card hero">
-      <h1>Panel Cliente</h1>
-      <p>Gestiona tus proxies, pedidos, y soporte.</p>
+    <div class="card">
+      <div class="kpi">Panel Cliente</div>
+      <p class="muted">Gestiona tus proxies, pedidos, notificaciones y soporte.</p>
       <div class="hr"></div>
 
       <div class="row">
@@ -2217,32 +2173,144 @@ def client_me(client=Depends(require_client)):
     return page("Cliente", body, subtitle="Tus proxies y pedidos")
 
 
-
+# =========================
+# CLIENT: BANK / PROXIES / NOTIFICATIONS
+# =========================
 @app.get("/bank", response_class=HTMLResponse)
 def client_bank(client=Depends(require_client)):
     title = get_setting("bank_title", "Cuenta bancaria")
     details = get_setting("bank_details", "")
 
     body = f"""
-    <div class="card hero">
-      <h1>🏦 {html_escape(title)}</h1>
-      <p>Usa estos datos para pagar y luego sube tu voucher.</p>
-      <div class="hr"></div>
+    <div class="card">
       <div class="row">
         <a class="btn ghost" href="/me">⬅️ Volver</a>
         <a class="btn" href="/buy">🛒 Comprar</a>
       </div>
-    </div>
-
-    <div class="card">
+      <div class="hr"></div>
+      <div class="kpi">🏦 {html_escape(title)}</div>
       <pre>{html_escape(details)}</pre>
     </div>
     """
     return page("Cuenta bancaria", body, subtitle="Pago")
 
 
+@app.get("/proxies", response_class=HTMLResponse)
+def client_proxies(client=Depends(require_client)):
+    uid = int(client["uid"])
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        rows = []
+        try:
+            cur.execute("SELECT id, ip, inicio, vence, estado, raw FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 300", (uid,))
+            rows = cur.fetchall()
+        except Exception:
+            rows = []
+        conn.close()
+        return rows
+
+    rows = _retry_sqlite(_do)
+
+    cards = ""
+    for r in rows:
+        raw = (r["raw"] or "").strip()
+        if raw and not raw.upper().startswith("HTTP"):
+            raw = "HTTP\n" + raw
+        proxy_text = raw or ("HTTP\n" + (r["ip"] or ""))
+
+        cards += f"""
+        <div class="card" style="margin-bottom:12px;">
+          <div class="muted">Proxy #{int(r['id'])} • {html_escape(r['estado'] or '')}</div>
+          <div style="height:6px;"></div>
+          <div><b>{html_escape(r['ip'] or '')}</b></div>
+          <div class="muted">Inicio: {html_escape(r['inicio'] or '')} • Vence: {html_escape(r['vence'] or '')}</div>
+          <div style="height:10px;"></div>
+          <pre>{html_escape(proxy_text)}</pre>
+          <div class="row">
+            <a class="btn ghost" href="/renew?proxy_id={int(r['id'])}">♻️ Renovar</a>
+          </div>
+        </div>
+        """
+
+    if not cards:
+        cards = "<div class='card'><p class='muted'>No tienes proxies todavía.</p></div>"
+
+    body = f"""
+    <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/me">⬅️ Volver</a>
+      </div>
+      <div class="hr"></div>
+      <div class="kpi">📦 Mis proxies</div>
+      <p class="muted">Aquí salen todas tus proxies.</p>
+    </div>
+    {cards}
+    """
+    return page("Mis proxies", body, subtitle="Listado")
+
+
+@app.get("/notifications", response_class=HTMLResponse)
+def client_notifications(client=Depends(require_client)):
+    uid = int(client["uid"])
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT id,message,seen,created_at FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 200", (uid,))
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+
+    rows = _retry_sqlite(_do)
+
+    cards = ""
+    unseen_ids = []
+    for n in rows:
+        seen = int(n["seen"] or 0)
+        if seen == 0:
+            unseen_ids.append(int(n["id"]))
+        badge = "<span class='badge'>NEW</span>" if seen == 0 else "<span class='badge'>OK</span>"
+        cards += f"""
+        <div class="card" style="margin-bottom:12px;">
+          <div class="muted">{badge} • {html_escape(n['created_at'] or '')}</div>
+          <pre>{html_escape(n['message'] or '')}</pre>
+        </div>
+        """
+
+    if not cards:
+        cards = "<div class='card'><p class='muted'>No tienes notificaciones.</p></div>"
+
+    # marcar visto automáticamente al abrir (si hay)
+    if unseen_ids:
+        def _mark():
+            conn = db_conn()
+            cur = conn.cursor()
+            cur.execute(
+                f"UPDATE notifications SET seen=1 WHERE user_id=? AND seen=0",
+                (uid,),
+            )
+            conn.commit()
+            conn.close()
+        _retry_sqlite(_mark)
+
+    body = f"""
+    <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/me">⬅️ Volver</a>
+      </div>
+      <div class="hr"></div>
+      <div class="kpi">🔔 Notificaciones</div>
+      <p class="muted">Tus actualizaciones recientes.</p>
+    </div>
+    {cards}
+    """
+    return page("Notificaciones", body, subtitle="Actualizaciones")
+
+
 # =========================
-# Comprar / Renovar + Voucher
+# BUY / RENEW / PAY / VOUCHER
 # =========================
 @app.get("/buy", response_class=HTMLResponse)
 def client_buy_page(client=Depends(require_client)):
@@ -2251,14 +2319,14 @@ def client_buy_page(client=Depends(require_client)):
     bank = get_setting("bank_details", "")
 
     body = f"""
-    <div class="card hero">
-      <h1>🛒 Comprar proxy</h1>
-      <p>Precio por proxy: <b>{p1} {html_escape(currency)}</b>. Crea tu pedido y sube el voucher.</p>
-      <div class="hr"></div>
+    <div class="card">
       <div class="row">
         <a class="btn ghost" href="/me">⬅️ Volver</a>
         <a class="btn ghost" href="/bank">🏦 Ver cuenta</a>
       </div>
+      <div class="hr"></div>
+      <div class="kpi">🛒 Comprar proxy</div>
+      <p class="muted">Precio por proxy: <b>{p1} {html_escape(currency)}</b>. Crea tu pedido y sube el voucher.</p>
     </div>
 
     <div class="grid">
@@ -2317,7 +2385,7 @@ def client_buy_submit(cantidad: str = Form("1"), email: str = Form(""), client=D
 
     rid = _retry_sqlite(_do)
     notify_user(uid, f"🧾 Pedido #{rid} creado. Sube tu voucher para continuar.")
-    return RedirectResponse(url=f"/order/{rid}/pay", status_code=302)
+    return RedirectResponse(url=f"/order/{int(rid)}/pay", status_code=302)
 
 
 @app.get("/renew", response_class=HTMLResponse)
@@ -2330,8 +2398,12 @@ def client_renew_page(client=Depends(require_client), proxy_id: str = ""):
     def _do():
         conn = db_conn()
         cur = conn.cursor()
-        cur.execute("SELECT id, ip, vence FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 200", (uid,))
-        rows = cur.fetchall()
+        rows = []
+        try:
+            cur.execute("SELECT id, ip, vence FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 300", (uid,))
+            rows = cur.fetchall()
+        except Exception:
+            rows = []
         conn.close()
         return rows
 
@@ -2342,14 +2414,14 @@ def client_renew_page(client=Depends(require_client), proxy_id: str = ""):
         opts += f"<option value='{int(r['id'])}' {sel}>#{int(r['id'])} • {html_escape(r['ip'] or '')} • vence {html_escape(r['vence'] or '')}</option>"
 
     body = f"""
-    <div class="card hero">
-      <h1>♻️ Renovar proxy</h1>
-      <p>Renovación: <b>{pr} {html_escape(currency)}</b> (30 días). Luego sube el voucher.</p>
-      <div class="hr"></div>
+    <div class="card">
       <div class="row">
         <a class="btn ghost" href="/me">⬅️ Volver</a>
         <a class="btn ghost" href="/bank">🏦 Ver cuenta</a>
       </div>
+      <div class="hr"></div>
+      <div class="kpi">♻️ Renovar proxy</div>
+      <p class="muted">Renovación: <b>{pr} {html_escape(currency)}</b>. Luego sube el voucher.</p>
     </div>
 
     <div class="grid">
@@ -2419,7 +2491,7 @@ def client_renew_submit(proxy_id: str = Form(...), email: str = Form(""), note: 
 
     rid = _retry_sqlite(_do)
     notify_user(uid, f"🧾 Pedido #{rid} (renovación) creado. Sube tu voucher para continuar.")
-    return RedirectResponse(url=f"/order/{rid}/pay", status_code=302)
+    return RedirectResponse(url=f"/order/{int(rid)}/pay", status_code=302)
 
 
 @app.get("/order/{rid}/pay", response_class=HTMLResponse)
@@ -2452,12 +2524,15 @@ def client_order_pay(rid: int, client=Depends(require_client)):
         extra = f"<p class='muted'>Proxy a renovar: <b>#{int(r['target_proxy_id'])}</b></p>"
 
     body = f"""
-    <div class="card hero">
-      <h1>💳 Pago del pedido #{int(r['id'])}</h1>
-      <p>Tipo: <b>{html_escape(r['tipo'] or '')}</b> • Total: <b>{int(r['monto'])} {html_escape(r['currency'] or 'DOP')}</b></p>
-      {extra}
+    <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/me">⬅️ Volver</a>
+      </div>
       <div class="hr"></div>
-      <a class="btn ghost" href="/me">⬅️ Volver</a>
+
+      <div class="kpi">💳 Pago del pedido #{int(r['id'])}</div>
+      <p class="muted">Tipo: <b>{html_escape(r['tipo'] or '')}</b> • Total: <b>{int(r['monto'])} {html_escape(r['currency'] or 'DOP')}</b></p>
+      {extra}
     </div>
 
     <div class="grid">
@@ -2535,31 +2610,23 @@ def client_order_voucher(rid: int, file: UploadFile = File(...), client=Depends(
     notify_user(uid, f"🧾 Voucher recibido para pedido #{rid}. En revisión.")
     admin_log("voucher_uploaded", json.dumps({"rid": rid, "uid": uid, "path": rel_path}, ensure_ascii=False))
 
-    body = f"""
-    <div class="card hero">
-      <h1>✅ Voucher enviado</h1>
-      <p>Tu voucher fue subido correctamente.</p>
-      <div class="hr"></div>
-      <div class="row">
-        <a class="btn" href="/order/{int(rid)}/pay">🔎 Ver pedido</a>
-        <a class="btn ghost" href="/me">⬅️ Volver</a>
-      </div>
-    </div>
-    """
-    return page("Voucher enviado", body, subtitle="En revisión")
+    return nice_error_page("Voucher enviado", "Tu voucher fue subido correctamente.", f"/order/{rid}/pay", "🔎 Ver pedido")
 
 
 # =========================
-# Cliente: Agregar proxy existente (solicitud -> admin aprueba)
+# CLIENT: ADD EXISTING (CLAIM)
 # =========================
 @app.get("/add-existing", response_class=HTMLResponse)
 def client_add_existing_page(client=Depends(require_client)):
     body = """
-    <div class="card hero">
-      <h1>➕ Agregar proxy existente</h1>
-      <p>Si ya tenías una proxy de antes, envía la solicitud para que el admin la verifique y te la active en tu cuenta.</p>
+    <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/me">⬅️ Volver</a>
+      </div>
       <div class="hr"></div>
-      <a class="btn ghost" href="/me">⬅️ Volver</a>
+
+      <div class="kpi">➕ Agregar proxy existente</div>
+      <p class="muted">Envía la solicitud para que el admin la verifique y te la active.</p>
     </div>
 
     <div class="card">
@@ -2616,13 +2683,12 @@ def client_add_existing_submit(ip: str = Form(""), raw: str = Form(""), vence: s
 
 
 # =========================
-# Soporte (burbuja) — sin "detail no autorizado"
+# SUPPORT (TICKETS) — NO "detail no autorizado"
 # =========================
 @app.get("/support", response_class=HTMLResponse)
 def support_page(request: Request):
     c = try_client(request)
     if not c:
-        # Redirigir sin error feo
         return RedirectResponse(url="/client/login", status_code=302)
 
     uid = int(c["uid"])
@@ -2631,7 +2697,7 @@ def support_page(request: Request):
         conn = db_conn()
         cur = conn.cursor()
         cur.execute(
-            "SELECT id,subject,message,admin_reply,status,created_at FROM tickets WHERE user_id=? ORDER BY id DESC LIMIT 12",
+            "SELECT id,subject,message,admin_reply,status,created_at FROM tickets WHERE user_id=? ORDER BY id DESC LIMIT 20",
             (uid,),
         )
         rows = cur.fetchall()
@@ -2645,8 +2711,8 @@ def support_page(request: Request):
         reply = (t["admin_reply"] or "").strip()
         reply_block = f"<div class='muted'><b>Agente:</b></div><pre>{html_escape(reply)}</pre>" if reply else "<div class='muted'>Aún sin respuesta.</div>"
         hist += f"""
-        <div class="card">
-          <div class="muted">Ticket #{t['id']} • {html_escape(t['created_at'] or '')} • {html_escape(t['status'] or '')}</div>
+        <div class="card" style="margin-bottom:12px;">
+          <div class="muted">Ticket #{int(t['id'])} • {html_escape(t['created_at'] or '')} • {html_escape(t['status'] or '')}</div>
           <div><b>{html_escape(t['subject'] or 'Soporte')}</b></div>
           <pre>{html_escape(t['message'] or '')}</pre>
           {reply_block}
@@ -2656,11 +2722,13 @@ def support_page(request: Request):
         hist = "<div class='card'><p class='muted'>Aún no has creado tickets.</p></div>"
 
     body = f"""
-    <div class="card hero">
-      <h1>💬 Soporte</h1>
-      <p>Bienvenido/a 👋 Cuéntanos cuál es el problema y un agente te contestará lo más rápido posible.</p>
+    <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/me">⬅️ Volver</a>
+      </div>
       <div class="hr"></div>
-      <a class="btn ghost" href="/me">⬅️ Volver</a>
+      <div class="kpi">💬 Soporte</div>
+      <p class="muted">Crea un ticket y te respondemos.</p>
     </div>
 
     <div class="card">
@@ -2676,7 +2744,7 @@ def support_page(request: Request):
       </form>
     </div>
 
-    <h3 style="margin:18px 0 10px 0;">📜 Historial (últimos 12)</h3>
+    <h3 style="margin:18px 0 10px 0;">📜 Historial</h3>
     {hist}
     """
     return page("Soporte", body, subtitle=f"Cliente #{uid}")
@@ -2739,7 +2807,3 @@ def api_outbox(admin=Depends(require_admin)):
 
     rows = _retry_sqlite(_do)
     return {"enabled": True, "items": rows}
-
-
-
-
