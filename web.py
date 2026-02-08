@@ -2041,7 +2041,7 @@ def client_me(client=Depends(require_client)):
     for r in orders_rows:
         voucher = (r["voucher_path"] or "").strip()
         voucher_cell = f"<a href='/static/{html_escape(voucher)}' target='_blank'>ver</a>" if voucher else "-"
-        ohtml += (
+        ohtml += 
             "<tr>"
 
       if not ohtml:
