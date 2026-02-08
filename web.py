@@ -1,3 +1,5 @@
+
+# -*- coding: utf-8 -*-
 # web.py — Gproxy Web Panel (FastAPI) — PREMIUM + FIXES
 # ✅ Admin + Cliente (cookies)
 # ✅ Clientes: signup + verify PIN + login
@@ -533,7 +535,8 @@ def html_escape(s: str) -> str:
 
 def _support_fab_html() -> str:
     return """
-    <a href="/support?next=/me" class="support-fab" title="Soporte">💬</a>
+    <a href="/support" class="support-fab">💬</a>
+
     """
 
 
@@ -1215,20 +1218,26 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
         phtml = "<tr><td colspan='4' class='muted'>Sin proxies</td></tr>"
 
     ohtml = ""
-    for r in req_rows:
-        ohtml += (
-            "<tr>"
-            f"<td>#{r['id']}</td>"
-            f"<td>{html_escape(r['tipo'] or '')}</td>"
-            f"<td>{html_escape(r['ip'] or '-')}</td>"
-            f"<td>{r['cantidad']}</td>"
-            f"<td>{r['monto']}</td>"
-            f"<td>{html_escape(r['estado'] or '')}</td>"
-            f"<td>{html_escape(r['created_at'] or '')}</td>"
-            "</tr>"
-        )
-    if not ohtml:
-        ohtml = "<tr><td colspan='7' class='muted'>Sin pedidos</td></tr>"
+for r in orders_rows:
+    voucher = (r["voucher_path"] or "").strip()
+    voucher_cell = f"<a href='/static/{html_escape(voucher)}' target='_blank'>ver</a>" if voucher else "-"
+
+    row_html = (
+        "<tr>"
+        f"<td>#{r['id']}</td>"
+        f"<td>{html_escape(r['tipo'] or '')}</td>"
+        f"<td>{html_escape(r['ip'] or '-')}</td>"
+        f"<td>{int(r['cantidad'] or 0)}</td>"
+        f"<td>{html_escape(str(r['monto'] or '0'))}</td>"
+        f"<td>{html_escape(r['estado'] or '')}</td>"
+        f"<td>{html_escape(r['created_at'] or '')}</td>"
+        f"<td>{voucher_cell}</td>"
+        "</tr>"
+    )
+    ohtml += row_html
+
+if not ohtml:
+    ohtml = "<tr><td colspan='8' class='muted'>No hay pedidos</td></tr>"
 
     toggle_label = "🔓 Desbloquear" if blocked == 1 else "⛔ Bloquear"
     toggle_class = "btn" if blocked == 1 else "btn bad"
