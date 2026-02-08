@@ -814,7 +814,7 @@ def client_me(client=Depends(require_client)):
             if voucher else "-"
         )
 
-        ohtml += (
+        ohtml += 
             "<tr>"
             f"<td>#{int(r['id'])}</td>"
             f"<td>{html_escape(r['tipo'] or '')}</td>"
@@ -2151,8 +2151,8 @@ def client_me(client=Depends(require_client)):
     for r in orders_rows:
         voucher = (r["voucher_path"] or "").strip()
         voucher_cell = f"<a href='/static/{html_escape(voucher)}' target='_blank'>ver</a>" if voucher else "-"
-        ohtml += 
-            "<tr>"
+        ohtml += "<tr>"
+
 
       if not ohtml:
         ohtml = "<tr><td colspan='8' class='muted'>No hay pedidos</td></tr>"
