@@ -5,7 +5,7 @@
 # - Comprar/Renovar + subir voucher
 # - Soporte tipo tickets (burbuja flotante)
 # - "Agregar proxy existente" (claim) -> admin aprueba y se agrega a proxies
-# - Admin: users/orders/tickets/settings/stock/reset/maintenance
+# - Admin: accounts/orders/tickets/settings/stock/reset/maintenance
 # - SQLite robusto: WAL + busy_timeout + retries (evita "database is locked")
 # - Errores bonitos (sin stacktrace al usuario)
 
@@ -823,7 +823,7 @@ def admin_dashboard(admin=Depends(require_admin)):
             return v
         return _retry_sqlite(_do)
 
-    users = count("SELECT COUNT(*) FROM accounts")
+    accounts = count("SELECT COUNT(*) FROM accounts")
   # del bot (si existe)
     proxies = count("SELECT COUNT(*) FROM proxies")
     pending = count("SELECT COUNT(*) FROM requests WHERE estado IN ('awaiting_voucher','voucher_received','awaiting_admin_verify')")
@@ -839,7 +839,7 @@ def admin_dashboard(admin=Depends(require_admin)):
       <p class="muted">Panel premium. Todo lo importante aquí.</p>
       <div class="hr"></div>
       <div class="row">
-        <a class="btn" href="/admin/users">👥 Usuarios</a>
+        <a class="btn" href="/admin/accounts">👥 Usuarios</a>
         <a class="btn" href="/admin/orders">📨 Pedidos <span class="badge">{pending}</span></a>
         <a class="btn" href="/admin/proxies">📦 Proxies</a>
         <a class="btn" href="/admin/tickets">💬 Tickets <span class="badge">{tickets}</span></a>
@@ -853,7 +853,7 @@ def admin_dashboard(admin=Depends(require_admin)):
     <div class="row">
       <div class="card" style="flex:1; min-width:220px;">
         <div class="muted">Usuarios</div>
-        <div class="kpi">{users}</div>
+        <div class="kpi">{accounts}</div>
       </div>
       <div class="card" style="flex:1; min-width:220px;">
         <div class="muted">Proxies</div>
@@ -1132,10 +1132,10 @@ def admin_reset_do(
 
 
 # =========================
-# ADMIN: USERS
+# ADMIN: accounts
 # =========================
-@app.get("/admin/users", response_class=HTMLResponse)
-def admin_users(admin=Depends(require_admin), q: str = ""):
+@app.get("/admin/accounts", response_class=HTMLResponse)
+def admin_accounts(admin=Depends(require_admin), q: str = ""):
     q = (q or "").strip()
 
     def _do():
@@ -1145,13 +1145,13 @@ def admin_users(admin=Depends(require_admin), q: str = ""):
         try:
             if q:
                 cur.execute(
-                    "SELECT user_id, username, is_blocked, last_seen FROM users "
+                    "SELECT user_id, username, is_blocked, last_seen FROM accounts "
                     "WHERE CAST(user_id AS TEXT) LIKE ? OR username LIKE ? "
                     "ORDER BY last_seen DESC LIMIT 80",
                     (f"%{q}%", f"%{q}%"),
                 )
             else:
-                cur.execute("SELECT user_id, username, is_blocked, last_seen FROM users ORDER BY last_seen DESC LIMIT 80")
+                cur.execute("SELECT user_id, username, is_blocked, last_seen FROM accounts ORDER BY last_seen DESC LIMIT 80")
             rows = cur.fetchall()
         except Exception:
             rows = []
@@ -1182,7 +1182,7 @@ def admin_users(admin=Depends(require_admin), q: str = ""):
       </div>
       <div class="hr"></div>
 
-      <form method="get" action="/admin/users">
+      <form method="get" action="/admin/accounts">
         <label class="muted">Buscar</label>
         <input name="q" value="{html_escape(q)}" placeholder="Ej: 1915349159 o yudith"/>
         <div style="height:12px;"></div>
@@ -1205,14 +1205,14 @@ def admin_user_toggle_block(user_id: int, admin=Depends(require_admin)):
     def _do():
         conn = db_conn()
         cur = conn.cursor()
-        cur.execute("SELECT is_blocked FROM users WHERE user_id=?", (int(user_id),))
+        cur.execute("SELECT is_blocked FROM accounts WHERE user_id=?", (int(user_id),))
         r = cur.fetchone()
         if not r:
             conn.close()
             raise HTTPException(404, "Usuario no encontrado")
         blocked = int(r["is_blocked"] or 0)
         newv = 0 if blocked == 1 else 1
-        cur.execute("UPDATE users SET is_blocked=? WHERE user_id=?", (newv, int(user_id)))
+        cur.execute("UPDATE accounts SET is_blocked=? WHERE user_id=?", (newv, int(user_id)))
         conn.commit()
         conn.close()
         return newv
@@ -1230,7 +1230,7 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
 
         u = None
         try:
-            cur.execute("SELECT user_id, username, is_blocked, created_at, last_seen FROM users WHERE user_id=?", (int(user_id),))
+            cur.execute("SELECT user_id, username, is_blocked, created_at, last_seen FROM accounts WHERE user_id=?", (int(user_id),))
             u = cur.fetchone()
         except Exception:
             u = None
@@ -1259,7 +1259,7 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
     u, proxies_rows, req_rows = _retry_sqlite(_do)
 
     if not u:
-        return nice_error_page("Usuario", "No encontré ese usuario.", "/admin/users", "⬅️ Volver")
+        return nice_error_page("Usuario", "No encontré ese usuario.", "/admin/accounts", "⬅️ Volver")
 
     uname = u["username"] or "-"
     blocked = int(u["is_blocked"] or 0)
@@ -1303,7 +1303,7 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
     body = f"""
     <div class="card">
       <div class="row">
-        <a class="btn ghost" href="/admin/users">⬅️ Usuarios</a>
+        <a class="btn ghost" href="/admin/accounts">⬅️ Usuarios</a>
         <a class="btn ghost" href="/admin">🏠 Dashboard</a>
 
         <form method="post" action="/admin/user/{int(user_id)}/toggle_block" style="margin-left:auto;">
