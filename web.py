@@ -2222,8 +2222,16 @@ notif_badge = f"<span class='badge'>{unread}</span>" if unread > 0 else ""
 def client_me(client=Depends(require_client)):
     uid = int(client["uid"])
 
-    # ejemplo: contador de notificaciones
-    unread = 0  # aquí va tu conteo real
+    # --- contar notificaciones no leídas ---
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT COUNT(*) FROM notifications WHERE user_id=? AND seen=0", (uid,))
+        unread = int(cur.fetchone()[0] or 0)
+    except Exception:
+        unread = 0
+    conn.close()
+
     notif_badge = f"<span class='badge'>{unread}</span>" if unread > 0 else ""
 
     body = f"""
