@@ -2163,11 +2163,6 @@ def client_me(client=Depends(require_client)):
     # Botón de notificaciones
 notif_badge = f"<span class='badge'>{unread}</span>" if unread > 0 else ""
 
-...
-
-<a class="btn ghost" href="/notifications">🔔 Notificaciones {notif_badge}</a>
-
-
 
     body = f"""
     <div class="card hero">
@@ -2255,14 +2250,19 @@ def client_notifications(client=Depends(require_client)):
         items = "<div class='card'><p class='muted'>No tienes notificaciones.</p></div>"
 
     body = f"""
-    <div class="card hero">
-      <h1>🔔 Notificaciones</h1>
-      <p>Mensajes del sistema.</p>
-      <div class="hr"></div>
-      <div class="row">
-        <a class="btn ghost" href="/me">⬅️ Volver</a>
-      </div>
-    </div>
+<div class="card hero">
+  <h1>Panel Cliente</h1>
+
+  <div class="row">
+    <a class="btn" href="/buy">🛒 Comprar proxy</a>
+
+    <a class="btn ghost" href="/notifications">
+      🔔 Notificaciones {notif_badge}
+    </a>
+
+    <a class="btn ghost" href="/logout">🚪 Salir</a>
+  </div>
+</div>
     {items}
     """
     return page("Cliente • Notificaciones", body, subtitle="Actualizaciones")
