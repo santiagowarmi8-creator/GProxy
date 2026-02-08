@@ -823,7 +823,8 @@ def admin_dashboard(admin=Depends(require_admin)):
             return v
         return _retry_sqlite(_do)
 
-    users = count("SELECT COUNT(*) FROM users")  # del bot (si existe)
+    users = count("SELECT COUNT(*) FROM accounts")
+  # del bot (si existe)
     proxies = count("SELECT COUNT(*) FROM proxies")
     pending = count("SELECT COUNT(*) FROM requests WHERE estado IN ('awaiting_voucher','voucher_received','awaiting_admin_verify')")
     tickets = count("SELECT COUNT(*) FROM tickets WHERE status='open'")
