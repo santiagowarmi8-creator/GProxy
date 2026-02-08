@@ -334,17 +334,44 @@ def ensure_schema() -> str:
     conn = db_conn()
     cur = conn.cursor()
 
+    # 1) settings (compat con DB vieja)
+    #    Primero crea la tabla "mínima" (key,value) si no existe.
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS settings(
             key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at TEXT NOT NULL DEFAULT ''
+            value TEXT NOT NULL
         )
         """
     )
     conn.commit()
 
+    # 2) Luego aseguramos updated_at (migración)
+    try:
+        _ensure_column(conn, "settings", "updated_at", "TEXT NOT NULL DEFAULT ''")
+    except Exception:
+        # si por algo falla, no tumbes el startup
+        pass
+
+    # 3) Ya es seguro insertar usando updated_at
+    def ins(key: str, value: str):
+        cur.execute(
+            "INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES(?,?,?)",
+            (key, value, now_str()),
+        )
+
+    # defaults
+    ins("maintenance_enabled", "0")
+    ins("maintenance_message", "⚠️ Estamos en mantenimiento. Vuelve en unos minutos.")
+    ins("bank_title", "Cuenta bancaria")
+    ins("bank_details", "Banco: Banreservas (Ahorro)\nTitular: Yudith Domínguez\nCuenta: 4248676174")
+    ins("precio_primera", "1500")
+    ins("precio_renovacion", "1000")
+    ins("dias_proxy", str(DEFAULT_DIAS_PROXY))
+    ins("currency", "DOP")
+    ins("stock_available", "0")
+
+    # accounts
     _ensure_table(
         conn,
         """
@@ -361,6 +388,7 @@ def ensure_schema() -> str:
     )
     _ensure_column(conn, "accounts", "recovery_pin_hash", "TEXT NOT NULL DEFAULT ''")
 
+    # signup_pins
     _ensure_table(
         conn,
         """
@@ -376,6 +404,7 @@ def ensure_schema() -> str:
         """,
     )
 
+    # tickets
     _ensure_table(
         conn,
         """
@@ -392,6 +421,7 @@ def ensure_schema() -> str:
         """,
     )
 
+    # notifications
     _ensure_table(
         conn,
         """
@@ -405,6 +435,7 @@ def ensure_schema() -> str:
         """,
     )
 
+    # admin logs
     _ensure_table(
         conn,
         """
@@ -417,6 +448,7 @@ def ensure_schema() -> str:
         """,
     )
 
+    # outbox
     if ENABLE_OUTBOX:
         _ensure_table(
             conn,
@@ -430,22 +462,6 @@ def ensure_schema() -> str:
             );
             """,
         )
-
-    def ins(key: str, value: str):
-        cur.execute(
-            "INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES(?,?,?)",
-            (key, value, now_str()),
-        )
-
-    ins("maintenance_enabled", "0")
-    ins("maintenance_message", "⚠️ Estamos en mantenimiento. Vuelve en unos minutos.")
-    ins("bank_title", "Cuenta bancaria")
-    ins("bank_details", "Banco: Banreservas (Ahorro)\nTitular: Yudith Domínguez\nCuenta: 4248676174")
-    ins("precio_primera", "1500")
-    ins("precio_renovacion", "1000")
-    ins("dias_proxy", str(DEFAULT_DIAS_PROXY))
-    ins("currency", "DOP")
-    ins("stock_available", "0")
 
     # persist CLIENT_SECRET
     cur.execute("SELECT value FROM settings WHERE key=?", ("client_secret_persist",))
