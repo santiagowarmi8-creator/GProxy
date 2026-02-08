@@ -1035,7 +1035,7 @@ def admin_stock_save(stock_available: str = Form("0"), admin=Depends(require_adm
         v = 0
     set_setting("stock_available", str(v))
     admin_log("stock_set", json.dumps({"stock_available": v}, ensure_ascii=False))
-    return RedirectResponse(url="/admin/stock", status_code=302)
+    return RedirectResponse(url="/admin/stock", status_code=303)
 
 
 # =========================
@@ -2160,7 +2160,11 @@ def client_me(client=Depends(require_client)):
     if not ohtml:
         ohtml = "<tr><td colspan='8' class='muted'>No hay pedidos</td></tr>"
 
-    notif_btn = f"🔔 Notificaciones <span class='badge'>{unread}</span>" if unread else "🔔 Notificaciones"
+    notif_badge = f"<span class='badge'>{unread}</span>" if unread else ""
+...
+<a class="btn ghost" href="/notifications">🔔 Notificaciones {notif_badge}</a>
+
+
 
     body = f"""
     <div class="card hero">
@@ -2219,21 +2223,31 @@ def client_me(client=Depends(require_client)):
 @app.get("/notifications", response_class=HTMLResponse)
 def client_notifications(client=Depends(require_client)):
     uid = int(client["uid"])
+    conn = db()
+    cur = conn.cursor()
 
-    def _do():
-        conn = db_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT id,message,seen,created_at FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 60", (uid,))
-        rows = cur.fetchall()
-        cur.execute("UPDATE notifications SET seen=1 WHERE user_id=?", (uid,))
-        conn.commit()
-        conn.close()
-        return rows
+    cur.execute(
+        "SELECT id,message,seen,created_at FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 80",
+        (uid,),
+    )
+    rows = cur.fetchall()
 
-    rows = _retry_sqlite(_do)
+    cur.execute("UPDATE notifications SET seen=1 WHERE user_id=?", (uid,))
+    conn.commit()
+    conn.close()
+
     items = ""
     for n in rows:
-        items += f"<div class='card'><div class='muted'>{html_escape(n['created_at'] or '')}</div><div>{html_escape(n['message'] or '')}</div></div>"
+        seen = int(n["seen"] or 0)
+        badge = "✅" if seen else "🆕"
+        items += f"""
+        <div class="card">
+          <div class="muted">{badge} {html_escape(n['created_at'] or '')}</div>
+          <div style="height:6px;"></div>
+          <div>{html_escape(n['message'] or '')}</div>
+        </div>
+        """
+
     if not items:
         items = "<div class='card'><p class='muted'>No tienes notificaciones.</p></div>"
 
@@ -2242,11 +2256,14 @@ def client_notifications(client=Depends(require_client)):
       <h1>🔔 Notificaciones</h1>
       <p>Mensajes del sistema.</p>
       <div class="hr"></div>
-      <a class="btn ghost" href="/me">⬅️ Volver</a>
+      <div class="row">
+        <a class="btn ghost" href="/me">⬅️ Volver</a>
+      </div>
     </div>
     {items}
     """
-    return page("Notificaciones", body, subtitle="Actualizaciones")
+    return page("Cliente • Notificaciones", body, subtitle="Actualizaciones")
+
 
 
 @app.get("/proxies", response_class=HTMLResponse)
@@ -2847,3 +2864,4 @@ def api_outbox(admin=Depends(require_admin)):
 
     rows = _retry_sqlite(_do)
     return {"enabled": True, "items": rows}
+
