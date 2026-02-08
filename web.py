@@ -1,16 +1,12 @@
-# web.py — Gproxy Web Panel (FastAPI) PREMIUM
-# - Anti "database is locked" (WAL + busy_timeout + retry)
-# - No muestra trazas/códigos al usuario (handlers HTML)
-# - Soporte FAB funciona (si no hay sesión, redirige al login)
-# - Stock por cantidad (no pegar proxies)
-# - PIN de recuperación (definido en signup) + reset password
-# - Admin reset (wipe) con confirmación
-# - UI premium + efectos botones
-#
-# Fixes nuevos:
-# - Handler para RequestValidationError (evita "Ocurrió un error interno")
-# - signup con recovery_pin opcional en firma para evitar 422, pero validado manual
-# - migración: agrega accounts.recovery_pin_hash si la tabla existía vieja
+# web.py — Gproxy Web Panel (FastAPI) PREMIUM (FULL)
+# ✅ Anti "database is locked" (WAL + busy_timeout + retry)
+# ✅ No muestra trazas/códigos al usuario (handlers HTML)
+# ✅ Soporte FAB funciona (si no hay sesión, redirige al login)
+# ✅ Stock por cantidad (no pegar proxies)
+# ✅ PIN recuperación (en signup) + forgot password
+# ✅ Admin wipe (borrar todo) con confirmación y feedback
+# ✅ UI premium + ripple efecto botones
+# ✅ Incluye rutas: /me /buy /renew /bank /proxies /notifications /support /order/{rid}/pay /voucher etc.
 
 import os
 import time
@@ -47,11 +43,11 @@ COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax").strip()
 
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
 VOUCHER_DIR = os.path.join(UPLOAD_DIR, "vouchers")
-INVOICE_DIR = os.path.join(UPLOAD_DIR, "invoices")
 
 DEFAULT_DIAS_PROXY = 30
+
 SQLITE_TIMEOUT = float(os.getenv("SQLITE_TIMEOUT", "30"))
-SQLITE_BUSY_MS = int(os.getenv("SQLITE_BUSY_MS", "8000"))  # busy_timeout
+SQLITE_BUSY_MS = int(os.getenv("SQLITE_BUSY_MS", "8000"))
 SQLITE_RETRIES = int(os.getenv("SQLITE_RETRIES", "6"))
 SQLITE_RETRY_SLEEP = float(os.getenv("SQLITE_RETRY_SLEEP", "0.25"))
 
@@ -62,7 +58,7 @@ SQLITE_RETRY_SLEEP = float(os.getenv("SQLITE_RETRY_SLEEP", "0.25"))
 app = FastAPI(title=APP_TITLE)
 
 os.makedirs(VOUCHER_DIR, exist_ok=True)
-os.makedirs(INVOICE_DIR, exist_ok=True)
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 app.mount("/static", StaticFiles(directory=UPLOAD_DIR), name="static")
 
 CLIENT_SECRET: Optional[str] = None
@@ -103,9 +99,6 @@ def _connect() -> sqlite3.Connection:
 
 
 def db_exec(fn: Callable[[sqlite3.Connection], Any]) -> Any:
-    """
-    Ejecuta fn(conn) con reintentos si aparece 'database is locked'.
-    """
     last_err = None
     for i in range(SQLITE_RETRIES):
         conn = _connect()
@@ -115,7 +108,6 @@ def db_exec(fn: Callable[[sqlite3.Connection], Any]) -> Any:
             conn.close()
             return res
         except HTTPException:
-            # ✅ importante: dejar pasar HTTPException sin convertirlo en "error interno"
             conn.rollback()
             conn.close()
             raise
@@ -180,7 +172,6 @@ def ensure_web_schema() -> str:
         );
         """,
     )
-    # ✅ migración si accounts existía vieja:
     _ensure_column(conn, "accounts", "recovery_pin_hash", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "accounts", "verified", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "accounts", "created_at", "TEXT NOT NULL DEFAULT ''")
@@ -261,7 +252,6 @@ def ensure_web_schema() -> str:
             """,
         )
 
-    # defaults
     def ins(key: str, value: str):
         cur.execute(
             "INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES(?,?,?)",
@@ -270,16 +260,12 @@ def ensure_web_schema() -> str:
 
     ins("maintenance_enabled", "0")
     ins("maintenance_message", "⚠️ Estamos en mantenimiento. Vuelve en unos minutos.")
-
     ins("bank_title", "Cuenta bancaria")
     ins("bank_details", "Banco: Banreservas (Ahorro)\nTitular: Yudith Domínguez\nCuenta: 4248676174")
-
     ins("precio_primera", "1500")
     ins("precio_renovacion", "1000")
     ins("dias_proxy", str(DEFAULT_DIAS_PROXY))
     ins("currency", "DOP")
-
-    # stock por cantidad
     ins("stock_available", "0")
 
     # Persist CLIENT_SECRET
@@ -314,7 +300,7 @@ def ensure_web_schema() -> str:
     conn.commit()
     conn.close()
 
-    # Migraciones en tablas del bot (si existen)
+    # Migraciones para tablas del bot (si existen)
     def safe_migrate():
         c = _connect()
         try:
@@ -450,6 +436,29 @@ def verify(token: str, secret: str) -> Dict[str, Any]:
 
 
 # =========================
+# Cookie helper (FIX login "no hace nada")
+# =========================
+def _is_https(request: Request) -> bool:
+    # Railway / reverse proxy usually sends x-forwarded-proto
+    xf = (request.headers.get("x-forwarded-proto") or "").lower().strip()
+    if xf in ("https", "http"):
+        return xf == "https"
+    return (request.url.scheme or "").lower() == "https"
+
+
+def set_cookie_smart(request: Request, resp: RedirectResponse, name: str, value: str, max_age: Optional[int] = None):
+    secure = COOKIE_SECURE and _is_https(request)
+    resp.set_cookie(
+        name,
+        value,
+        httponly=True,
+        secure=secure,
+        samesite=COOKIE_SAMESITE,
+        max_age=max_age,
+    )
+
+
+# =========================
 # Guards
 # =========================
 def require_admin(request: Request) -> Dict[str, Any]:
@@ -486,7 +495,7 @@ def client_optional(request: Request) -> Optional[Dict[str, Any]]:
 
 
 # =========================
-# Password hashing
+# Password + PIN helpers
 # =========================
 def _pbkdf2_hash(password: str, salt: bytes, rounds: int = 200_000) -> bytes:
     return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, rounds)
@@ -518,9 +527,6 @@ def password_check(password: str, stored: str) -> bool:
         return False
 
 
-# =========================
-# PIN helpers
-# =========================
 def pin_hash(pin: str, secret: str) -> str:
     return hmac.new(secret.encode("utf-8"), pin.encode("utf-8"), hashlib.sha256).hexdigest()
 
@@ -560,6 +566,26 @@ def toast(msg: str, kind: str = "info") -> str:
       {html_escape(msg)}
     </div>
     """
+
+
+def pretty_error_page(title: str, msg: str, back_href: str = "/", back_label: str = "Volver"):
+    body = f"""
+    <div class="card hero">
+      <h1>{html_escape(title)}</h1>
+      <p>{html_escape(msg)}</p>
+      <div class="hr"></div>
+      <a class="btn ghost" href="{html_escape(back_href)}">⬅️ {html_escape(back_label)}</a>
+    </div>
+    """
+    return page(title, body, subtitle="")
+
+
+def _guess_back(path: str) -> str:
+    if path.startswith("/admin"):
+        return "/admin/login"
+    if path.startswith("/client") or path in ("/me", "/buy", "/renew", "/bank", "/proxies", "/support", "/notifications"):
+        return "/client/login"
+    return "/"
 
 
 def page(title: str, body: str, subtitle: str = "") -> str:
@@ -727,37 +753,15 @@ def page(title: str, body: str, subtitle: str = "") -> str:
 </html>"""
 
 
-def pretty_error_page(title: str, msg: str, back_href: str = "/", back_label: str = "Volver"):
-    body = f"""
-    <div class="card hero">
-      <h1>{html_escape(title)}</h1>
-      <p>{html_escape(msg)}</p>
-      <div class="hr"></div>
-      <a class="btn ghost" href="{html_escape(back_href)}">⬅️ {html_escape(back_label)}</a>
-    </div>
-    """
-    return page(title, body, subtitle="")
-
-
-def _guess_back(path: str) -> str:
-    if path.startswith("/admin"):
-        return "/admin/login"
-    if path.startswith("/client") or path in ("/me", "/buy", "/renew", "/bank", "/proxies", "/support"):
-        return "/client/login"
-    return "/"
-
-
 # =========================
 # Global exception handlers (NO códigos)
 # =========================
 @app.exception_handler(RequestValidationError)
 def validation_exc_handler(request: Request, exc: RequestValidationError):
-    # ✅ evita "error interno" en formularios
     if request.url.path.startswith("/api/"):
         return JSONResponse({"detail": "Datos inválidos", "errors": exc.errors()}, status_code=422)
 
     back = _guess_back(request.url.path)
-    # Mensaje simple, sin mostrar estructura interna
     return HTMLResponse(
         pretty_error_page("Datos inválidos", "Revisa los campos del formulario e intenta de nuevo.", back_href=back),
         status_code=422,
@@ -769,10 +773,8 @@ def http_exc_handler(request: Request, exc: HTTPException):
     if request.url.path.startswith("/api/"):
         return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
 
-    status = exc.status_code
-    msg = str(exc.detail)
     back = _guess_back(request.url.path)
-    return HTMLResponse(pretty_error_page("Ups", msg, back_href=back), status_code=status)
+    return HTMLResponse(pretty_error_page("Ups", str(exc.detail), back_href=back), status_code=exc.status_code)
 
 
 @app.exception_handler(Exception)
@@ -858,7 +860,7 @@ def admin_login_page(msg: str = ""):
 
 
 @app.post("/admin/login")
-def admin_login(password: str = Form("")):
+def admin_login(request: Request, password: str = Form("")):
     if not ADMIN_PASSWORD:
         return RedirectResponse(url="/admin/login?msg=Falta+ADMIN_PASSWORD", status_code=302)
     if (password or "").strip() != ADMIN_PASSWORD:
@@ -866,7 +868,7 @@ def admin_login(password: str = Form("")):
 
     token = sign({"role": "admin"}, JWT_SECRET, exp_seconds=8 * 3600)
     resp = RedirectResponse(url="/admin", status_code=302)
-    resp.set_cookie("admin_session", token, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE)
+    set_cookie_smart(request, resp, "admin_session", token, max_age=8 * 3600)
     return resp
 
 
@@ -878,7 +880,7 @@ def admin_logout():
 
 
 # =========================
-# ADMIN DASHBOARD + helpers
+# ADMIN DASHBOARD
 # =========================
 def safe_count(sql: str, params: Tuple = ()) -> int:
     def _fn(conn):
@@ -888,7 +890,6 @@ def safe_count(sql: str, params: Tuple = ()) -> int:
             return int(cur.fetchone()[0])
         except Exception:
             return 0
-
     return db_exec(_fn)
 
 
@@ -896,10 +897,8 @@ def safe_count(sql: str, params: Tuple = ()) -> int:
 def admin_dashboard(admin=Depends(require_admin)):
     users = safe_count("SELECT COUNT(*) FROM users")
     proxies = safe_count("SELECT COUNT(*) FROM proxies")
+    pending = safe_count("SELECT COUNT(*) FROM requests WHERE estado IN ('awaiting_voucher','voucher_received','awaiting_admin_verify')")
     open_tickets = safe_count("SELECT COUNT(*) FROM tickets WHERE status='open'")
-    pending = safe_count(
-        "SELECT COUNT(*) FROM requests WHERE estado IN ('awaiting_voucher','voucher_received','awaiting_admin_verify')"
-    )
     stock = int(float(get_setting("stock_available", "0") or 0))
 
     maint = get_setting("maintenance_enabled", "0") == "1"
@@ -931,7 +930,7 @@ def admin_dashboard(admin=Depends(require_admin)):
         <div class="kpi">{proxies}</div>
       </div>
       <div class="card" style="flex:1; min-width:220px;">
-        <div class="muted">Pendientes</div>
+        <div class="muted">Pedidos pendientes</div>
         <div class="kpi">{pending}</div>
       </div>
       <div class="card" style="flex:1; min-width:220px;">
@@ -966,9 +965,7 @@ def admin_settings_page(admin=Depends(require_admin), msg: str = ""):
       <h1>⚙️ Banco / Precios</h1>
       <p>Configura pagos y precios.</p>
       <div class="hr"></div>
-      <div class="row">
-        <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
-      </div>
+      <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
     </div>
 
     <div class="card">
@@ -1150,7 +1147,7 @@ def admin_maintenance_set(
 
 
 # =========================
-# ADMIN TOOLS (wipe)
+# ADMIN TOOLS (wipe) - FIXED
 # =========================
 @app.get("/admin/tools", response_class=HTMLResponse)
 def admin_tools(admin=Depends(require_admin), msg: str = ""):
@@ -1165,9 +1162,7 @@ def admin_tools(admin=Depends(require_admin), msg: str = ""):
     <div class="card">
       {toast(msg, "warn") if msg else ""}
       <h3 style="margin:0 0 10px 0;">⚠️ Reset total</h3>
-      <p class="muted">
-        Borra: <b>accounts</b>, <b>tickets</b>, <b>notifications</b>, <b>signup_pins</b> y (si existen) <b>requests</b>, <b>proxies</b>, <b>users</b>.
-      </p>
+      <p class="muted">Borra datos del panel web y del bot (si las tablas existen).</p>
       <div class="hr"></div>
       <form method="post" action="/admin/tools/wipe">
         <label class="muted">Escribe <b>RESET</b></label>
@@ -1187,20 +1182,26 @@ def admin_wipe(confirm: str = Form(""), admin=Depends(require_admin)):
 
     def _fn(conn):
         cur = conn.cursor()
-        cur.execute("DELETE FROM accounts")
-        cur.execute("DELETE FROM tickets")
-        cur.execute("DELETE FROM notifications")
-        cur.execute("DELETE FROM signup_pins")
-        cur.execute(
-            "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-            ("stock_available", "0", now_str()),
-        )
+        # web tables
+        for table in ("accounts", "tickets", "notifications", "signup_pins"):
+            try:
+                cur.execute(f"DELETE FROM {table}")
+            except Exception:
+                pass
+
+        # bot tables (optional)
         for table in ("requests", "proxies", "users"):
             try:
                 cur.execute(f"DELETE FROM {table}")
             except Exception:
                 pass
+
+        # reset stock
+        cur.execute(
+            "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            ("stock_available", "0", now_str()),
+        )
 
     db_exec(_fn)
     admin_log("wipe_all", "RESET")
@@ -1333,7 +1334,7 @@ def admin_order_approve(rid: int, admin=Depends(require_admin)):
                 raise HTTPException(400, f"Stock insuficiente. Disponible: {stock}")
             stock -= qty
             cur.execute("UPDATE requests SET estado=? WHERE id=?", ("approved", int(rid)))
-            notify_user(uid, f"✅ Pedido #{rid} aprobado. Te entregaremos {qty} proxy(s).")
+            notify_user(uid, f"✅ Pedido #{rid} aprobado. Compra: {qty} proxy(s).")
         else:
             cur.execute("UPDATE requests SET estado=? WHERE id=?", ("approved", int(rid)))
             notify_user(uid, f"✅ Pedido #{rid} aprobado.")
@@ -1501,7 +1502,7 @@ def client_signup_page(msg: str = ""):
 def client_signup(
     phone: str = Form(""),
     password: str = Form(""),
-    recovery_pin: str = Form(""),  # ✅ ahora no dispara 422 si falta
+    recovery_pin: str = Form(""),
 ):
     phone = (phone or "").strip()
     password = (password or "").strip()
@@ -1692,14 +1693,14 @@ def account_verify_login(phone: str, password: str) -> Optional[int]:
 
 
 @app.post("/client/login")
-def client_login(phone: str = Form(""), password: str = Form("")):
+def client_login(request: Request, phone: str = Form(""), password: str = Form("")):
     uid = account_verify_login(phone, password)
     if not uid:
         return RedirectResponse(url="/client/login?msg=Login+inválido+o+cuenta+no+verificada", status_code=302)
 
     session = sign({"role": "client", "uid": int(uid)}, CLIENT_SECRET, exp_seconds=7 * 24 * 3600)
     resp = RedirectResponse(url="/me", status_code=302)
-    resp.set_cookie("client_session", session, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE)
+    set_cookie_smart(request, resp, "client_session", session, max_age=7 * 24 * 3600)
     return resp
 
 
@@ -1781,7 +1782,619 @@ def client_logout():
 
 
 # =========================
-# SUPPORT (FAB works)
+# CLIENT: PANEL /ME (FIX "NO HACE NADA")
+# =========================
+@app.get("/me", response_class=HTMLResponse)
+def client_me(client=Depends(require_client)):
+    uid = int(client["uid"])
+
+    maint = get_setting("maintenance_enabled", "0") == "1"
+    if maint:
+        msg = get_setting("maintenance_message", "⚠️ Estamos en mantenimiento.")
+        body = f"""
+        <div class="card hero">
+          <h1>🛠 Mantenimiento</h1>
+          <p>{html_escape(msg)}</p>
+          <div class="hr"></div>
+          <a class="btn ghost" href="/logout">🚪 Salir</a>
+          <a class="btn ghost" href="/">🏠 Inicio</a>
+        </div>
+        """
+        return page("Cliente", body, subtitle="En mantenimiento")
+
+    def _fn(conn):
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM notifications WHERE user_id=? AND seen=0", (uid,))
+        unread = int(cur.fetchone()[0])
+
+        proxies_rows = []
+        orders_rows = []
+        try:
+            cur.execute("SELECT id, ip, inicio, vence, estado, raw FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 10", (uid,))
+            proxies_rows = cur.fetchall()
+        except Exception:
+            proxies_rows = []
+
+        try:
+            cur.execute(
+                "SELECT id, tipo, ip, cantidad, monto, estado, created_at, voucher_path, currency "
+                "FROM requests WHERE user_id=? ORDER BY id DESC LIMIT 20",
+                (uid,),
+            )
+            orders_rows = cur.fetchall()
+        except Exception:
+            orders_rows = []
+
+        return unread, proxies_rows, orders_rows
+
+    unread, proxies_rows, orders_rows = db_exec(_fn)
+
+    # Proxies cards
+    phtml = ""
+    for r in proxies_rows:
+        raw = (r["raw"] or "").strip()
+        if raw and not raw.upper().startswith("HTTP"):
+            raw = "HTTP\n" + raw
+        proxy_text = raw or ("HTTP\n" + (r["ip"] or ""))
+
+        vence = (r["vence"] or "").strip()
+        countdown = f"<span class='badge' data-exp='{html_escape(vence)}'>...</span>" if vence else "<span class='badge'>-</span>"
+
+        phtml += f"""
+        <div class="card">
+          <div class="muted">Proxy ID {r['id']} • {html_escape(r['estado'] or '')} • {countdown}</div>
+          <div style="height:6px;"></div>
+          <div><b>{html_escape(r['ip'] or '')}</b></div>
+          <div class="muted">Inicio: {html_escape(r['inicio'] or '')} • Vence: {html_escape(vence)}</div>
+          <div style="height:10px;"></div>
+          <pre>{html_escape(proxy_text)}</pre>
+          <div class="row">
+            <a class="btn ghost" href="/renew">♻️ Renovar</a>
+          </div>
+        </div>
+        """
+    if not phtml:
+        phtml = "<div class='card'><p class='muted'>No tienes proxies todavía.</p></div>"
+
+    # Orders table
+    ohtml = ""
+    for r in orders_rows:
+        voucher = (r["voucher_path"] or "").strip()
+        voucher_cell = f"<a href='/static/{html_escape(voucher)}' target='_blank'>ver</a>" if voucher else "-"
+        ohtml += (
+            "<tr>"
+            f"<td>#{r['id']}</td>"
+            f"<td>{html_escape(r['tipo'] or '')}</td>"
+            f"<td>{html_escape(r['ip'] or '-')}</td>"
+            f"<td>{int(r['cantidad'] or 1)}</td>"
+            f"<td>{int(r['monto'] or 0)} {html_escape(r['currency'] or 'DOP')}</td>"
+            f"<td>{html_escape(r['estado'] or '')}</td>"
+            f"<td>{html_escape(r['created_at'] or '')}</td>"
+            f"<td><a class='btn ghost' href='/order/{int(r['id'])}/pay'>pago</a></td>"
+            f"<td>{voucher_cell}</td>"
+            "</tr>"
+        )
+    if not ohtml:
+        ohtml = "<tr><td colspan='10' class='muted'>No hay pedidos</td></tr>"
+
+    notif_btn = f"🔔 Notificaciones <span class='badge'>{unread}</span>" if unread else "🔔 Notificaciones"
+
+    body = f"""
+    <div class="card hero">
+      <h1>Panel Cliente</h1>
+      <p>Gestiona tus proxies, pedidos y soporte.</p>
+      <div class="hr"></div>
+
+      <div class="row">
+        <a class="btn" href="/buy">🛒 Comprar proxy</a>
+        <a class="btn" href="/renew">♻️ Renovar proxy</a>
+        <a class="btn ghost" href="/proxies">📦 Ver mis proxies</a>
+        <a class="btn ghost" href="/bank">🏦 Cuenta bancaria</a>
+        <a class="btn ghost" href="/notifications">{notif_btn}</a>
+        <a class="btn ghost" href="/logout" style="margin-left:auto;">🚪 Salir</a>
+      </div>
+    </div>
+
+    <h3 style="margin:18px 0 10px 0;">📦 Mis proxies (últimos 10)</h3>
+    {phtml}
+
+    <h3 style="margin:18px 0 10px 0;">📨 Mis pedidos (últimos 20)</h3>
+    <div class="card">
+      <table>
+        <tr><th>ID</th><th>Tipo</th><th>IP</th><th>Qty</th><th>Monto</th><th>Estado</th><th>Creado</th><th>Pago</th><th>Voucher</th></tr>
+        {ohtml}
+      </table>
+    </div>
+
+    <script>
+      function pad(n){{return String(n).padStart(2,'0');}}
+      function tick(){{
+        const els = document.querySelectorAll('[data-exp]');
+        const now = new Date().getTime();
+        els.forEach(el => {{
+          const s = el.getAttribute('data-exp');
+          if(!s) return;
+          let t = new Date(s.replace(' ', 'T')).getTime();
+          let diff = Math.floor((t - now)/1000);
+          if (isNaN(diff)) {{ el.textContent='...'; return; }}
+          if (diff <= 0) {{ el.textContent='EXPIRADO'; return; }}
+          const days = Math.floor(diff / 86400);
+          diff -= days*86400;
+          const h = Math.floor(diff/3600); diff -= h*3600;
+          const m = Math.floor(diff/60); diff -= m*60;
+          const sec = diff;
+          el.textContent = (days>0? (days+'d ') : '') + pad(h)+':'+pad(m)+':'+pad(sec);
+        }});
+      }}
+      tick(); setInterval(tick, 1000);
+    </script>
+    """
+    return page("Cliente", body, subtitle="Tus proxies y pedidos")
+
+
+# =========================
+# CLIENT: NOTIFICATIONS
+# =========================
+@app.get("/notifications", response_class=HTMLResponse)
+def client_notifications(client=Depends(require_client)):
+    uid = int(client["uid"])
+
+    def _fn(conn):
+        cur = conn.cursor()
+        cur.execute("SELECT id,message,seen,created_at FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 60", (uid,))
+        rows = cur.fetchall()
+        cur.execute("UPDATE notifications SET seen=1 WHERE user_id=?", (uid,))
+        return rows
+
+    rows = db_exec(_fn)
+
+    items = ""
+    for n in rows:
+        items += f"<div class='card'><div class='muted'>{html_escape(n['created_at'] or '')}</div><div>{html_escape(n['message'] or '')}</div></div>"
+    if not items:
+        items = "<div class='card'><p class='muted'>No tienes notificaciones.</p></div>"
+
+    body = f"""
+    <div class="card hero">
+      <h1>🔔 Notificaciones</h1>
+      <p>Mensajes del sistema.</p>
+      <div class="hr"></div>
+      <a class="btn ghost" href="/me">⬅️ Volver</a>
+    </div>
+    {items}
+    """
+    return page("Cliente • Notificaciones", body, subtitle="Actualizaciones")
+
+
+# =========================
+# CLIENT: PROXIES
+# =========================
+@app.get("/proxies", response_class=HTMLResponse)
+def client_proxies(client=Depends(require_client)):
+    uid = int(client["uid"])
+
+    def _fn(conn):
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT id, ip, inicio, vence, estado, raw FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 200", (uid,))
+            return cur.fetchall()
+        except Exception:
+            return []
+
+    rows = db_exec(_fn)
+
+    cards = ""
+    for r in rows:
+        raw = (r["raw"] or "").strip()
+        if raw and not raw.upper().startswith("HTTP"):
+            raw = "HTTP\n" + raw
+        proxy_text = raw or ("HTTP\n" + (r["ip"] or ""))
+        vence = (r["vence"] or "").strip()
+        countdown = f"<span class='badge' data-exp='{html_escape(vence)}'>...</span>" if vence else "<span class='badge'>-</span>"
+
+        cards += f"""
+        <div class="card">
+          <div class="muted">Proxy ID {r['id']} • {html_escape(r['estado'] or '')} • {countdown}</div>
+          <div><b>{html_escape(r['ip'] or '')}</b></div>
+          <div class="muted">Inicio: {html_escape(r['inicio'] or '')} • Vence: {html_escape(vence)}</div>
+          <div style="height:10px;"></div>
+          <pre>{html_escape(proxy_text)}</pre>
+        </div>
+        """
+    if not cards:
+        cards = "<div class='card'><p class='muted'>No tienes proxies todavía.</p></div>"
+
+    body = f"""
+    <div class="card hero">
+      <h1>📦 Mis proxies</h1>
+      <p>Listado completo de tus proxies.</p>
+      <div class="hr"></div>
+      <div class="row">
+        <a class="btn ghost" href="/me">⬅️ Volver</a>
+        <a class="btn" href="/buy">🛒 Comprar</a>
+        <a class="btn ghost" href="/bank">🏦 Cuenta bancaria</a>
+      </div>
+    </div>
+    {cards}
+    <script>
+      function pad(n){{return String(n).padStart(2,'0');}}
+      function tick(){{
+        const els = document.querySelectorAll('[data-exp]');
+        const now = new Date().getTime();
+        els.forEach(el => {{
+          const s = el.getAttribute('data-exp');
+          if(!s) return;
+          let t = new Date(s.replace(' ', 'T')).getTime();
+          let diff = Math.floor((t - now)/1000);
+          if (diff <= 0) {{ el.textContent='EXPIRADO'; return; }}
+          const days = Math.floor(diff / 86400);
+          diff -= days*86400;
+          const h = Math.floor(diff/3600); diff -= h*3600;
+          const m = Math.floor(diff/60); diff -= m*60;
+          const sec = diff;
+          el.textContent = (days>0? (days+'d ') : '') + pad(h)+':'+pad(m)+':'+pad(sec);
+        }});
+      }}
+      tick(); setInterval(tick, 1000);
+    </script>
+    """
+    return page("Cliente • Mis proxies", body, subtitle="Listado")
+
+
+# =========================
+# CLIENT: BANK
+# =========================
+@app.get("/bank", response_class=HTMLResponse)
+def client_bank(client=Depends(require_client)):
+    title = get_setting("bank_title", "Cuenta bancaria")
+    details = get_setting("bank_details", "")
+
+    body = f"""
+    <div class="card hero">
+      <h1>🏦 {html_escape(title)}</h1>
+      <p>Usa estos datos para realizar el pago y luego sube tu voucher.</p>
+      <div class="hr"></div>
+      <div class="row">
+        <a class="btn ghost" href="/me">⬅️ Volver</a>
+        <a class="btn" href="/buy">🛒 Comprar proxy</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <pre>{html_escape(details or "Aún no hay datos bancarios configurados. (Admin: /admin/settings)")}</pre>
+    </div>
+    """
+    return page("Cliente • Cuenta bancaria", body, subtitle="Datos de pago")
+
+
+# =========================
+# CLIENT: BUY
+# =========================
+@app.get("/buy", response_class=HTMLResponse)
+def client_buy_page(client=Depends(require_client), msg: str = ""):
+    p1 = int(float(get_setting("precio_primera", "1500") or 1500))
+    currency = get_setting("currency", "DOP")
+    bank = get_setting("bank_details", "")
+    stock = int(float(get_setting("stock_available", "0") or 0))
+
+    body = f"""
+    <div class="card hero">
+      <h1>🛒 Comprar proxy</h1>
+      <p>Precio por proxy: <b>{p1} {html_escape(currency)}</b></p>
+      <div class="hr"></div>
+      <div class="row">
+        <a class="btn ghost" href="/me">⬅️ Volver</a>
+        <a class="btn ghost" href="/bank">🏦 Ver cuenta bancaria</a>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        {toast(msg, "bad") if msg else ""}
+        <div class="muted">Stock disponible: <b>{stock}</b></div>
+        <div style="height:10px;"></div>
+        <form method="post" action="/buy">
+          <label class="muted">Cantidad</label>
+          <input name="cantidad" value="1" />
+          <div style="height:12px;"></div>
+
+          <label class="muted">Gmail para factura (opcional)</label>
+          <input name="email" placeholder="tuemail@gmail.com (opcional)" />
+          <div style="height:12px;"></div>
+
+          <button class="btn" type="submit">✅ Crear pedido</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <div class="muted">Cuenta bancaria (para pagar)</div>
+        <pre>{html_escape(bank)}</pre>
+        <div class="muted">Después del pago, sube tu voucher.</div>
+      </div>
+    </div>
+    """
+    return page("Cliente • Comprar", body, subtitle="Nuevo pedido")
+
+
+@app.post("/buy")
+def client_buy_submit(
+    cantidad: str = Form("1"),
+    email: str = Form(""),
+    client=Depends(require_client),
+):
+    uid = int(client["uid"])
+    email = (email or "").strip()
+
+    try:
+        qty = int(float((cantidad or "1").strip()))
+        if qty <= 0:
+            qty = 1
+    except Exception:
+        qty = 1
+
+    stock = int(float(get_setting("stock_available", "0") or 0))
+    if stock <= 0:
+        return RedirectResponse(url="/buy?msg=Sin+stock+por+ahora", status_code=302)
+
+    p1 = int(float(get_setting("precio_primera", "1500") or 1500))
+    currency = get_setting("currency", "DOP")
+    monto = int(p1 * qty)
+
+    def _fn(conn):
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO requests(user_id,tipo,ip,cantidad,monto,estado,created_at,email,currency,target_proxy_id,note) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (uid, "buy", "-", qty, monto, "awaiting_voucher", now_str(), email, currency, 0, ""),
+        )
+        return cur.lastrowid
+
+    rid = db_exec(_fn)
+    notify_user(uid, f"🧾 Pedido #{rid} creado. Sube tu voucher para continuar.")
+    return RedirectResponse(url=f"/order/{rid}/pay", status_code=302)
+
+
+# =========================
+# CLIENT: RENEW
+# =========================
+@app.get("/renew", response_class=HTMLResponse)
+def client_renew_page(client=Depends(require_client), msg: str = ""):
+    pr = int(float(get_setting("precio_renovacion", "1000") or 1000))
+    currency = get_setting("currency", "DOP")
+    bank = get_setting("bank_details", "")
+
+    uid = int(client["uid"])
+
+    def _fn(conn):
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT id, ip, vence FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 200", (uid,))
+            return cur.fetchall()
+        except Exception:
+            return []
+
+    rows = db_exec(_fn)
+
+    opts = "<option value=''>Selecciona...</option>"
+    for r in rows:
+        opts += f"<option value='{int(r['id'])}'>#{int(r['id'])} • {html_escape(r['ip'] or '')} • vence {html_escape(r['vence'] or '')}</option>"
+
+    body = f"""
+    <div class="card hero">
+      <h1>♻️ Renovar proxy</h1>
+      <p>Renovación: <b>{pr} {html_escape(currency)}</b> (30 días). Luego subes el voucher.</p>
+      <div class="hr"></div>
+      <div class="row">
+        <a class="btn ghost" href="/me">⬅️ Volver</a>
+        <a class="btn ghost" href="/proxies">📦 Ver mis proxies</a>
+        <a class="btn ghost" href="/bank">🏦 Ver cuenta bancaria</a>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        {toast(msg, "bad") if msg else ""}
+        <form method="post" action="/renew">
+          <label class="muted">Proxy a renovar</label>
+          <select name="proxy_id">{opts}</select>
+          <div style="height:12px;"></div>
+
+          <label class="muted">Gmail para factura (opcional)</label>
+          <input name="email" placeholder="tuemail@gmail.com (opcional)" />
+          <div style="height:12px;"></div>
+
+          <label class="muted">Nota (opcional)</label>
+          <input name="note" placeholder="Opcional" />
+          <div style="height:12px;"></div>
+
+          <button class="btn" type="submit">✅ Crear pedido de renovación</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <div class="muted">Cuenta bancaria (para pagar)</div>
+        <pre>{html_escape(bank)}</pre>
+        <div class="muted">Después del pago, sube tu voucher.</div>
+      </div>
+    </div>
+    """
+    return page("Cliente • Renovar", body, subtitle="Renovación")
+
+
+@app.post("/renew")
+def client_renew_submit(
+    proxy_id: str = Form(""),
+    email: str = Form(""),
+    note: str = Form(""),
+    client=Depends(require_client),
+):
+    uid = int(client["uid"])
+    email = (email or "").strip()
+    note = (note or "").strip()
+
+    try:
+        pid = int(proxy_id)
+        if pid <= 0:
+            raise ValueError()
+    except Exception:
+        return RedirectResponse(url="/renew?msg=Proxy+inválido", status_code=302)
+
+    def _fn(conn):
+        cur = conn.cursor()
+        cur.execute("SELECT id, ip FROM proxies WHERE id=? AND user_id=?", (pid, uid))
+        p = cur.fetchone()
+        if not p:
+            raise HTTPException(400, "No encontré ese proxy en tu cuenta.")
+
+        pr = int(float(get_setting("precio_renovacion", "1000") or 1000))
+        currency = get_setting("currency", "DOP")
+        monto = int(pr)
+
+        cur.execute(
+            "INSERT INTO requests(user_id,tipo,ip,cantidad,monto,estado,created_at,email,currency,target_proxy_id,note) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (uid, "renew", p["ip"] or "-", 1, monto, "awaiting_voucher", now_str(), email, currency, pid, note),
+        )
+        return cur.lastrowid
+
+    try:
+        rid = db_exec(_fn)
+    except HTTPException as e:
+        return RedirectResponse(url="/renew?msg=" + str(e.detail).replace(" ", "+"), status_code=302)
+
+    notify_user(uid, f"🧾 Pedido #{rid} (renovación) creado. Sube tu voucher para continuar.")
+    return RedirectResponse(url=f"/order/{rid}/pay", status_code=302)
+
+
+# =========================
+# CLIENT: ORDER PAY + UPLOAD VOUCHER
+# =========================
+@app.get("/order/{rid}/pay", response_class=HTMLResponse)
+def client_order_pay(rid: int, client=Depends(require_client)):
+    uid = int(client["uid"])
+    bank = get_setting("bank_details", "")
+    title = get_setting("bank_title", "Cuenta bancaria")
+
+    def _fn(conn):
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id,user_id,tipo,cantidad,monto,estado,created_at,voucher_path,email,currency,target_proxy_id "
+            "FROM requests WHERE id=?",
+            (int(rid),),
+        )
+        return cur.fetchone()
+
+    r = db_exec(_fn)
+
+    if not r or int(r["user_id"]) != uid:
+        raise HTTPException(404, "Pedido no encontrado.")
+
+    voucher = (r["voucher_path"] or "").strip()
+    voucher_block = ""
+    if voucher:
+        voucher_block = f"<p class='muted'>Voucher subido: <a href='/static/{html_escape(voucher)}' target='_blank'>ver</a></p>"
+
+    extra = ""
+    if (r["tipo"] or "") == "renew" and int(r["target_proxy_id"] or 0) > 0:
+        extra = f"<p class='muted'>Proxy a renovar: <b>#{int(r['target_proxy_id'])}</b></p>"
+
+    body = f"""
+    <div class="card hero">
+      <h1>💳 Pago del pedido #{int(r['id'])}</h1>
+      <p>Tipo: <b>{html_escape(r['tipo'] or '')}</b> • Total: <b>{int(r['monto'])} {html_escape(r['currency'] or 'DOP')}</b></p>
+      {extra}
+      <div class="hr"></div>
+      <div class="row">
+        <a class="btn ghost" href="/me">⬅️ Volver</a>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="muted">{html_escape(title)}</div>
+        <pre>{html_escape(bank)}</pre>
+        <div class="hr"></div>
+        <div class="muted">Estado actual: <b>{html_escape(r['estado'] or '')}</b></div>
+        {voucher_block}
+      </div>
+
+      <div class="card">
+        <h3 style="margin:0 0 10px 0;">🧾 Subir voucher</h3>
+        <form method="post" action="/order/{int(r['id'])}/voucher" enctype="multipart/form-data">
+          <label class="muted">Selecciona una imagen (jpg/png/webp)</label>
+          <input type="file" name="file" accept="image/*" />
+          <div style="height:12px;"></div>
+          <button class="btn" type="submit">📤 Enviar voucher</button>
+        </form>
+        <p class="muted" style="margin-top:10px;">El admin revisará tu voucher y aprobará tu pedido.</p>
+      </div>
+    </div>
+    """
+    return page("Cliente • Pago", body, subtitle="Sube tu comprobante")
+
+
+@app.post("/order/{rid}/voucher", response_class=HTMLResponse)
+def client_order_voucher(rid: int, file: UploadFile = File(...), client=Depends(require_client)):
+    uid = int(client["uid"])
+
+    if not file or not file.filename:
+        raise HTTPException(400, "Sube una imagen.")
+
+    # validar pedido
+    def _chk(conn):
+        cur = conn.cursor()
+        cur.execute("SELECT id,user_id,estado FROM requests WHERE id=?", (int(rid),))
+        return cur.fetchone()
+
+    r = db_exec(_chk)
+    if not r or int(r["user_id"]) != uid:
+        raise HTTPException(404, "Pedido no encontrado.")
+
+    ext = os.path.splitext(file.filename)[1].lower().strip()
+    if ext not in [".jpg", ".jpeg", ".png", ".webp"]:
+        ext = ".jpg"
+
+    fname = f"rid{int(rid)}_u{uid}_{secrets.token_hex(8)}{ext}"
+    rel_path = os.path.join("vouchers", fname)
+    abs_path = os.path.join(UPLOAD_DIR, rel_path)
+    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+
+    data = file.file.read()
+    if not data or len(data) < 200:
+        raise HTTPException(400, "Archivo inválido.")
+    if len(data) > 8 * 1024 * 1024:
+        raise HTTPException(400, "Imagen muy grande (máx 8MB).")
+
+    with open(abs_path, "wb") as f:
+        f.write(data)
+
+    def _upd(conn):
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE requests SET voucher_path=?, voucher_uploaded_at=?, estado=? WHERE id=?",
+            (rel_path, now_str(), "voucher_received", int(rid)),
+        )
+
+    db_exec(_upd)
+    notify_user(uid, f"🧾 Voucher recibido para pedido #{rid}. En revisión.")
+    admin_log("voucher_uploaded", json.dumps({"rid": rid, "uid": uid, "path": rel_path}, ensure_ascii=False))
+
+    body = f"""
+    <div class="card hero">
+      <h1>✅ Voucher enviado</h1>
+      <p>Tu voucher fue subido correctamente. El admin lo revisará.</p>
+      <div class="hr"></div>
+      <div class="row">
+        <a class="btn" href="/order/{int(rid)}/pay">🔎 Ver pedido</a>
+        <a class="btn ghost" href="/me">⬅️ Volver al panel</a>
+      </div>
+    </div>
+    """
+    return page("Voucher enviado", body, subtitle="En revisión")
+
+
+# =========================
+# SUPPORT (FAB works) - FIXED
 # =========================
 @app.get("/support", response_class=HTMLResponse)
 def support_page(request: Request):
