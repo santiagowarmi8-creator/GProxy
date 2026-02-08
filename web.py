@@ -1505,7 +1505,7 @@ def admin_orders_export(admin=Depends(require_admin)):
       <a class="btn ghost" href="/admin/orders">⬅️ Volver</a>
     </div>
     <div class="card">
-      <pre>{html_escape("\\n".join(lines))}</pre>
+      <pre>{csv_text}</pre>
     </div>
     """
     return page("Admin • Export", body, subtitle="CSV")
@@ -2908,3 +2908,4 @@ def api_outbox(admin=Depends(require_admin)):
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return {"enabled": True, "items": rows}
+
