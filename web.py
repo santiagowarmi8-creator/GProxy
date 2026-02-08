@@ -2218,55 +2218,31 @@ notif_badge = f"<span class='badge'>{unread}</span>" if unread > 0 else ""
     return page("Cliente", body, subtitle="Tus proxies y pedidos")
 
 
-@app.get("/notifications", response_class=HTMLResponse)
-def client_notifications(client=Depends(require_client)):
+@app.get("/me", response_class=HTMLResponse)
+def client_me(client=Depends(require_client)):
     uid = int(client["uid"])
-    conn = db()
-    cur = conn.cursor()
 
-    cur.execute(
-        "SELECT id,message,seen,created_at FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 80",
-        (uid,),
-    )
-    rows = cur.fetchall()
-
-    cur.execute("UPDATE notifications SET seen=1 WHERE user_id=?", (uid,))
-    conn.commit()
-    conn.close()
-
-    items = ""
-    for n in rows:
-        seen = int(n["seen"] or 0)
-        badge = "✅" if seen else "🆕"
-        items += f"""
-        <div class="card">
-          <div class="muted">{badge} {html_escape(n['created_at'] or '')}</div>
-          <div style="height:6px;"></div>
-          <div>{html_escape(n['message'] or '')}</div>
-        </div>
-        """
-
-    if not items:
-        items = "<div class='card'><p class='muted'>No tienes notificaciones.</p></div>"
+    # ejemplo: contador de notificaciones
+    unread = 0  # aquí va tu conteo real
+    notif_badge = f"<span class='badge'>{unread}</span>" if unread > 0 else ""
 
     body = f"""
-<div class="card hero">
-  <h1>Panel Cliente</h1>
+    <div class="card hero">
+      <h1>Panel Cliente</h1>
 
-  <div class="row">
-    <a class="btn" href="/buy">🛒 Comprar proxy</a>
+      <div class="row">
+        <a class="btn" href="/buy">🛒 Comprar proxy</a>
 
-    <a class="btn ghost" href="/notifications">
-      🔔 Notificaciones {notif_badge}
-    </a>
+        <a class="btn ghost" href="/notifications">
+          🔔 Notificaciones {notif_badge}
+        </a>
 
-    <a class="btn ghost" href="/logout">🚪 Salir</a>
-  </div>
-</div>
+        <a class="btn ghost" href="/logout">🚪 Salir</a>
+      </div>
+    </div>
     """
 
-    return page("Cliente • Notificaciones", body, subtitle="Actualizaciones")
-
+    return page("Cliente • Panel", body, subtitle="Inicio")
 
 
 @app.get("/proxies", response_class=HTMLResponse)
