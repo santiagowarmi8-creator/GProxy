@@ -814,8 +814,7 @@ def client_me(client=Depends(require_client)):
             if voucher else "-"
         )
 
-        ohtml += 
-            "<tr>"
+        ohtml += "<tr>"
             f"<td>#{int(r['id'])}</td>"
             f"<td>{html_escape(r['tipo'] or '')}</td>"
             f"<td>{html_escape(r['ip'] or '-')}</td>"
@@ -2740,6 +2739,7 @@ def api_outbox(admin=Depends(require_admin)):
 
     rows = _retry_sqlite(_do)
     return {"enabled": True, "items": rows}
+
 
 
 
