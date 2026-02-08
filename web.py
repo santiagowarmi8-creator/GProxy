@@ -825,7 +825,6 @@ def client_me(client=Depends(require_client)):
             f"<td>{html_escape(r['created_at'] or '')}</td>"
             f"<td>{voucher_cell}</td>"
             "</tr>"
-        )
 
     if not ohtml:
         ohtml = "<tr><td colspan='8' class='muted'>No hay pedidos</td></tr>"
@@ -2741,5 +2740,6 @@ def api_outbox(admin=Depends(require_admin)):
 
     rows = _retry_sqlite(_do)
     return {"enabled": True, "items": rows}
+
 
 
