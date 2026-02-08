@@ -1135,7 +1135,7 @@ def admin_reset_do(
 # ADMIN: accounts
 # =========================
 @app.get("/admin/accounts", response_class=HTMLResponse)
-@app.get("/admin/users/", response_class=HTMLResponse)
+@app.get("/admin/accounts/", response_class=HTMLResponse)
 def admin_accounts(admin=Depends(require_admin), q: str = ""):
     ...
 def admin_accounts(admin=Depends(require_admin), q: str = ""):
