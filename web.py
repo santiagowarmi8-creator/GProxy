@@ -1161,40 +1161,37 @@ def admin_users(admin=Depends(require_admin), q: str = ""):
     return page("Admin • Usuarios", body, subtitle="Gestión")
 
 
-@app.post("/admin/user/{user_id}/toggle_block")
-def admin_toggle_block(user_id: int, admin=Depends(require_admin)):
-    def _do():
-        conn = db_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT is_blocked FROM users WHERE user_id=?", (user_id,))
-        row = cur.fetchone()
-        curv = int(row["is_blocked"] or 0) if row else 0
-        newv = 0 if curv == 1 else 1
-        cur.execute("UPDATE users SET is_blocked=? WHERE user_id=?", (newv, user_id))
-        conn.commit()
-        conn.close()
-        return newv
-
-    newv = _retry_sqlite(_do)
-    outbox_add("user_block_toggled", json.dumps({"user_id": user_id, "is_blocked": newv}, ensure_ascii=False))
-    admin_log("user_toggle_block", json.dumps({"user_id": user_id, "blocked": newv}, ensure_ascii=False))
-    return RedirectResponse(url=f"/admin/users", status_code=302)
-
-
 @app.get("/admin/user/{user_id}", response_class=HTMLResponse)
 def admin_user_detail(user_id: int, admin=Depends(require_admin)):
     def _do():
         conn = db_conn()
         cur = conn.cursor()
-        cur.execute("SELECT user_id, username, is_blocked, created_at, last_seen FROM users WHERE user_id=?", (user_id,))
-        u = cur.fetchone()
-        cur.execute("SELECT id, ip, vence, estado FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 50", (user_id,))
-        proxies_rows = cur.fetchall()
+
         cur.execute(
-            "SELECT id, tipo, ip, cantidad, monto, estado, created_at FROM requests WHERE user_id=? ORDER BY id DESC LIMIT 50",
+            "SELECT user_id, username, is_blocked, created_at, last_seen FROM users WHERE user_id=?",
+            (user_id,),
+        )
+        u = cur.fetchone()
+
+        cur.execute(
+            "SELECT id, ip, vence, estado FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 50",
+            (user_id,),
+        )
+        proxies_rows = cur.fetchall()
+
+        # ✅ IMPORTANTE: aquí incluimos voucher_path también
+        cur.execute(
+            """
+            SELECT id, tipo, ip, cantidad, monto, estado, created_at, voucher_path
+            FROM requests
+            WHERE user_id=?
+            ORDER BY id DESC
+            LIMIT 50
+            """,
             (user_id,),
         )
         req_rows = cur.fetchall()
+
         conn.close()
         return u, proxies_rows, req_rows
 
@@ -1211,33 +1208,39 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
     blocked = int(u["is_blocked"] or 0)
     tag = "🚫 BLOQUEADO" if blocked == 1 else "✅ ACTIVO"
 
+    # ---- Proxies table ----
     phtml = ""
     for r in proxies_rows:
-        phtml += f"<tr><td>{r['id']}</td><td>{html_escape(r['ip'] or '')}</td><td>{html_escape(r['vence'] or '')}</td><td>{html_escape(r['estado'] or '')}</td></tr>"
+        phtml += (
+            f"<tr>"
+            f"<td>{r['id']}</td>"
+            f"<td>{html_escape(r['ip'] or '')}</td>"
+            f"<td>{html_escape(r['vence'] or '')}</td>"
+            f"<td>{html_escape(r['estado'] or '')}</td>"
+            f"</tr>"
+        )
     if not phtml:
         phtml = "<tr><td colspan='4' class='muted'>Sin proxies</td></tr>"
 
+    # ---- Pedidos table (FIX: req_rows + indent correcto) ----
     ohtml = ""
-for r in orders_rows:
-    voucher = (r["voucher_path"] or "").strip()
-    voucher_cell = f"<a href='/static/{html_escape(voucher)}' target='_blank'>ver</a>" if voucher else "-"
+    for r in req_rows:
+        voucher = (r["voucher_path"] or "").strip()
+        voucher_cell = f"<a href='/static/{html_escape(voucher)}' target='_blank'>ver</a>" if voucher else "-"
 
-    row_html = (
-        "<tr>"
-        f"<td>#{r['id']}</td>"
-        f"<td>{html_escape(r['tipo'] or '')}</td>"
-        f"<td>{html_escape(r['ip'] or '-')}</td>"
-        f"<td>{int(r['cantidad'] or 0)}</td>"
-        f"<td>{html_escape(str(r['monto'] or '0'))}</td>"
-        f"<td>{html_escape(r['estado'] or '')}</td>"
-        f"<td>{html_escape(r['created_at'] or '')}</td>"
-        f"<td>{voucher_cell}</td>"
-        "</tr>"
-    )
-    ohtml += row_html
+        ohtml += "<tr>"
+        ohtml += f"<td>#{r['id']}</td>"
+        ohtml += f"<td>{html_escape(r['tipo'] or '')}</td>"
+        ohtml += f"<td>{html_escape(r['ip'] or '-')}</td>"
+        ohtml += f"<td>{int(r['cantidad'] or 0)}</td>"
+        ohtml += f"<td>{html_escape(str(r['monto'] or '0'))}</td>"
+        ohtml += f"<td>{html_escape(r['estado'] or '')}</td>"
+        ohtml += f"<td>{html_escape(r['created_at'] or '')}</td>"
+        ohtml += f"<td>{voucher_cell}</td>"
+        ohtml += "</tr>"
 
-if not ohtml:
-    ohtml = "<tr><td colspan='8' class='muted'>No hay pedidos</td></tr>"
+    if not ohtml:
+        ohtml = "<tr><td colspan='8' class='muted'>No hay pedidos</td></tr>"
 
     toggle_label = "🔓 Desbloquear" if blocked == 1 else "⛔ Bloquear"
     toggle_class = "btn" if blocked == 1 else "btn bad"
@@ -1270,127 +1273,12 @@ if not ohtml:
     <div class="card">
       <h3 style="margin:0 0 10px 0;">📨 Pedidos</h3>
       <table>
-        <tr><th>ID</th><th>Tipo</th><th>IP</th><th>Qty</th><th>Monto</th><th>Estado</th><th>Creado</th></tr>
+        <tr><th>ID</th><th>Tipo</th><th>IP</th><th>Qty</th><th>Monto</th><th>Estado</th><th>Creado</th><th>Voucher</th></tr>
         {ohtml}
       </table>
     </div>
     """
     return page(f"Admin • Usuario {user_id}", body, subtitle="Detalle")
-
-
-# =========================
-# Admin Orders (approve/reject FIXED)
-# =========================
-@app.get("/admin/orders", response_class=HTMLResponse)
-def admin_orders(admin=Depends(require_admin), state: str = ""):
-    def _do():
-        conn = db_conn()
-        cur = conn.cursor()
-        where = ""
-        params = ()
-        if state.strip():
-            where = "WHERE estado=?"
-            params = (state.strip(),)
-        cur.execute(
-            f"""
-            SELECT id, user_id, tipo, ip, cantidad, monto, estado, created_at,
-                   voucher_path, voucher_uploaded_at, email, currency, target_proxy_id, note
-            FROM requests
-            {where}
-            ORDER BY id DESC
-            LIMIT 120
-            """,
-            params,
-        )
-        rows = cur.fetchall()
-        conn.close()
-        return rows
-
-    rows = _retry_sqlite(_do)
-
-    options = [
-        ("", "Todos"),
-        ("awaiting_voucher", "awaiting_voucher"),
-        ("voucher_received", "voucher_received"),
-        ("awaiting_admin_verify", "awaiting_admin_verify"),
-        ("approved", "approved"),
-        ("rejected", "rejected"),
-        ("cancelled", "cancelled"),
-    ]
-    opt_html = "".join(
-        f"<option value='{html_escape(val)}' {'selected' if (state or '') == val else ''}>{html_escape(label)}</option>"
-        for val, label in options
-    )
-
-    cards = ""
-    for r in rows:
-        rid = int(r["id"])
-        voucher_path = (r["voucher_path"] or "").strip()
-        voucher_link = (
-            f"<a class='btn ghost' href='/static/{html_escape(voucher_path)}' target='_blank'>🧾 Ver voucher</a>"
-            if voucher_path
-            else "<span class='muted'>Sin voucher</span>"
-        )
-
-        extra = ""
-        if (r["tipo"] or "") == "renew" and int(r["target_proxy_id"] or 0) > 0:
-            extra = f"<div class='muted'>Proxy a renovar: <b>#{int(r['target_proxy_id'])}</b></div>"
-        if (r["tipo"] or "") == "claim":
-            extra = f"<div class='muted'>Solicitud: <b>Agregar proxy existente</b></div>"
-
-        email = (r["email"] or "").strip()
-        email_txt = f" • Email factura: <b>{html_escape(email)}</b>" if email else ""
-
-        cards += f"""
-        <div class="card" style="margin-bottom:12px;">
-          <div class="muted">Pedido <b>#{rid}</b> • Estado: <b>{html_escape(r["estado"] or "")}</b></div>
-          <div style="height:8px;"></div>
-          <div><b>U:</b> <a class="btn ghost" href="/admin/user/{int(r["user_id"])}">👤 {int(r["user_id"])}</a></div>
-          <div class="muted" style="margin-top:6px;">
-            Tipo: <b>{html_escape(r["tipo"] or "")}</b>
-            • IP: <b>{html_escape(r["ip"] or "-")}</b>
-            • Qty: <b>{r["cantidad"]}</b>
-            • Monto: <b>{r["monto"]} {html_escape(r["currency"] or "DOP")}</b>
-            {email_txt}
-            <br/>Creado: {html_escape(r["created_at"] or "")}
-          </div>
-          {extra}
-
-          <div class="hr"></div>
-          <div class="row">
-            {voucher_link}
-            <form method="post" action="/admin/order/{rid}/approve">
-              <button class="btn" type="submit">✅ Aprobar</button>
-            </form>
-            <form method="post" action="/admin/order/{rid}/reject">
-              <button class="btn bad" type="submit">❌ Rechazar</button>
-            </form>
-          </div>
-        </div>
-        """
-
-    if not cards:
-        cards = "<div class='card'><p class='muted'>No hay pedidos en ese filtro.</p></div>"
-
-    body = f"""
-    <div class="card">
-      <div class="row">
-        <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
-      </div>
-      <div class="hr"></div>
-
-      <form method="get" action="/admin/orders">
-        <label class="muted">Filtrar por estado</label>
-        <select name="state">{opt_html}</select>
-        <div style="height:12px;"></div>
-        <button class="btn" type="submit">Aplicar filtro</button>
-      </form>
-    </div>
-
-    {cards}
-    """
-    return page("Admin • Pedidos", body, subtitle="Aprobar / Rechazar")
-
 
 def _deliver_buy_only_count(qty: int) -> bool:
     # tu nuevo stock es SOLO contador
@@ -2004,12 +1892,7 @@ def account_verify_login(phone: str, password: str) -> Optional[int]:
 def client_login(phone: str = Form(...), password: str = Form(...)):
     uid = account_verify_login(phone, password)
     if not uid:
-        return nice_error_page(
-            "Login inválido",
-            "Teléfono/contraseña incorrectos o cuenta no verificada.",
-            "/client/login",
-            "↩️ Intentar de nuevo",
-        )
+        return nice_error_page("Login inválido", "Teléfono/contraseña incorrectos o cuenta no verificada.", "/client/login", "↩️ Intentar de nuevo")
 
     session = sign({"role": "client", "uid": int(uid)}, CLIENT_SECRET, exp_seconds=7 * 24 * 3600)
     resp = RedirectResponse(url="/me", status_code=302)
@@ -2083,10 +1966,7 @@ def client_reset_submit(phone: str = Form(...), recovery_pin: str = Form(...), n
             conn.close()
             return False
 
-        cur.execute(
-            "UPDATE accounts SET password_hash=?, updated_at=? WHERE phone=?",
-            (password_make_hash(new_password), now_str(), phone),
-        )
+        cur.execute("UPDATE accounts SET password_hash=?, updated_at=? WHERE phone=?", (password_make_hash(new_password), now_str(), phone))
         conn.commit()
         conn.close()
         return True
@@ -2113,7 +1993,6 @@ def client_me(client=Depends(require_client)):
     def _do():
         conn = db_conn()
         cur = conn.cursor()
-
         cur.execute("SELECT COUNT(*) FROM notifications WHERE user_id=? AND seen=0", (uid,))
         unread = int(cur.fetchone()[0])
 
@@ -2127,15 +2006,10 @@ def client_me(client=Depends(require_client)):
         orders_rows = cur.fetchall()
 
         conn.close()
-        return (unread, proxies_rows, orders_rows)
+        return unread, proxies_rows, orders_rows
 
-    result = _retry_sqlite(_do)
-    if not result:
-        return nice_error_page("Servidor ocupado", "Intenta de nuevo en unos segundos.", "/me", "🔄 Reintentar")
+    unread, proxies_rows, orders_rows = _retry_sqlite(_do)
 
-    unread, proxies_rows, orders_rows = result
-
-    # Proxies cards con contador
     phtml = ""
     for r in proxies_rows:
         raw = (r["raw"] or "").strip()
@@ -2163,24 +2037,14 @@ def client_me(client=Depends(require_client)):
     if not phtml:
         phtml = "<div class='card'><p class='muted'>No tienes proxies todavía.</p></div>"
 
-    # ✅ ARREGLO TOTAL DE ohtml (sin paréntesis rotos)
     ohtml = ""
     for r in orders_rows:
         voucher = (r["voucher_path"] or "").strip()
         voucher_cell = f"<a href='/static/{html_escape(voucher)}' target='_blank'>ver</a>" if voucher else "-"
+        ohtml += (
+            "<tr>"
 
-        ohtml += "<tr>"
-        ohtml += f"<td>#{r['id']}</td>"
-        ohtml += f"<td>{html_escape(r['tipo'] or '')}</td>"
-        ohtml += f"<td>{html_escape(r['ip'] or '-')}</td>"
-        ohtml += f"<td>{int(r['cantidad'] or 0)}</td>"
-        ohtml += f"<td>{html_escape(str(r['monto'] or '0'))}</td>"
-        ohtml += f"<td>{html_escape(r['estado'] or '')}</td>"
-        ohtml += f"<td>{html_escape(r['created_at'] or '')}</td>"
-        ohtml += f"<td>{voucher_cell}</td>"
-        ohtml += "</tr>"
-
-    if not ohtml:
+      if not ohtml:
         ohtml = "<tr><td colspan='8' class='muted'>No hay pedidos</td></tr>"
 
     # Botón de notificaciones (badge)
@@ -2243,6 +2107,7 @@ def client_me(client=Depends(require_client)):
     </script>
     """
     return page("Cliente", body, subtitle="Tus proxies y pedidos")
+
 
 
 @app.get("/bank", response_class=HTMLResponse)
@@ -2766,6 +2631,5 @@ def api_outbox(admin=Depends(require_admin)):
 
     rows = _retry_sqlite(_do)
     return {"enabled": True, "items": rows}
-
 
 
