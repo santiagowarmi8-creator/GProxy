@@ -1134,11 +1134,11 @@ def admin_reset_do(
 # =========================
 # ADMIN: accounts
 # =========================
-@app.get("/admin/users", response_class=HTMLResponse)
+@app.get("/admin/accounts", response_class=HTMLResponse)
 @app.get("/admin/users/", response_class=HTMLResponse)
-def admin_users(admin=Depends(require_admin), q: str = ""):
+def admin_accounts(admin=Depends(require_admin), q: str = ""):
     ...
-def admin_users(admin=Depends(require_admin), q: str = ""):
+def admin_accounts(admin=Depends(require_admin), q: str = ""):
     q = (q or "").strip()
 
     def _do():
@@ -1194,7 +1194,7 @@ def admin_users(admin=Depends(require_admin), q: str = ""):
     </div>
 
     <div class="card">
-      <form method="get" action="/admin/users">
+      <form method="get" action="/admin/accounts">
         <label class="muted">Buscar por ID o Teléfono</label>
         <input name="q" value="{html_escape(q)}" placeholder="Ej: 1 o +1809..."/>
         <div style="height:12px;"></div>
