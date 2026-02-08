@@ -737,50 +737,160 @@ async def unhandled_exc_handler(request: Request, exc: Exception):
 # =========================
 # Public
 # =========================
-@app.get("/", response_class=HTMLResponse)
-def home():
+# =========================
+# Client portal
+# =========================
+@app.get("/me", response_class=HTMLResponse)
+def client_me(client=Depends(require_client)):
+    uid = int(client["uid"])
+
     maint = get_setting("maintenance_enabled", "0") == "1"
-    mtxt = get_setting("maintenance_message", "")
-    status = "🟠 Mantenimiento" if maint else "🟢 Online"
-    dot_class = "warn" if maint else ""
+    if maint:
+        msg = get_setting("maintenance_message", "⚠️ Estamos en mantenimiento.")
+        return nice_error_page("Mantenimiento", msg, "/logout", "🚪 Salir")
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+
+        cur.execute("SELECT COUNT(*) FROM notifications WHERE user_id=? AND seen=0", (uid,))
+        unread = int(cur.fetchone()[0])
+
+        cur.execute(
+            "SELECT id, ip, inicio, vence, estado, raw FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 10",
+            (uid,),
+        )
+        proxies_rows = cur.fetchall()
+
+        cur.execute(
+            "SELECT id, tipo, ip, cantidad, monto, estado, created_at, voucher_path "
+            "FROM requests WHERE user_id=? ORDER BY id DESC LIMIT 20",
+            (uid,),
+        )
+        orders_rows = cur.fetchall()
+
+        conn.close()
+        return unread, proxies_rows, orders_rows
+
+    unread, proxies_rows, orders_rows = _retry_sqlite(_do)
+
+    # ---- Proxies cards ----
+    phtml = ""
+    for r in proxies_rows:
+        raw = (r["raw"] or "").strip()
+        if raw and not raw.upper().startswith("HTTP"):
+            raw = "HTTP\n" + raw
+        proxy_text = raw or ("HTTP\n" + (r["ip"] or ""))
+
+        vence = (r["vence"] or "").strip()
+        countdown = (
+            f"<span class='badge' data-exp='{html_escape(vence)}'>...</span>"
+            if vence else "<span class='badge'>-</span>"
+        )
+
+        phtml += f"""
+        <div class="card">
+          <div class="muted">Proxy ID {int(r['id'])} • {html_escape(r['estado'] or '')} • {countdown}</div>
+          <div style="height:6px;"></div>
+          <div><b>{html_escape(r['ip'] or '')}</b></div>
+          <div class="muted">Inicio: {html_escape(r['inicio'] or '')} • Vence: {html_escape(vence)}</div>
+          <div style="height:10px;"></div>
+          <pre>{html_escape(proxy_text)}</pre>
+          <div class="row">
+            <a class="btn ghost" href="/renew?proxy_id={int(r['id'])}">♻️ Renovar</a>
+          </div>
+        </div>
+        """
+
+    if not phtml:
+        phtml = "<div class='card'><p class='muted'>No tienes proxies todavía.</p></div>"
+
+    # ---- Orders table rows (FIX) ----
+    ohtml = ""
+    for r in orders_rows:
+        voucher = (r["voucher_path"] or "").strip()
+        voucher_cell = (
+            f"<a href='/static/{html_escape(voucher)}' target='_blank'>ver</a>"
+            if voucher else "-"
+        )
+
+        ohtml += (
+            "<tr>"
+            f"<td>#{int(r['id'])}</td>"
+            f"<td>{html_escape(r['tipo'] or '')}</td>"
+            f"<td>{html_escape(r['ip'] or '-')}</td>"
+            f"<td>{int(r['cantidad'] or 0)}</td>"
+            f"<td>{html_escape(str(r['monto'] or '0'))}</td>"
+            f"<td>{html_escape(r['estado'] or '')}</td>"
+            f"<td>{html_escape(r['created_at'] or '')}</td>"
+            f"<td>{voucher_cell}</td>"
+            "</tr>"
+        )
+
+    if not ohtml:
+        ohtml = "<tr><td colspan='8' class='muted'>No hay pedidos</td></tr>"
+
+    # Botón de notificaciones (badge)
+    notif_badge = f"<span class='badge'>{unread}</span>" if int(unread) > 0 else ""
+    notif_btn = f"🔔 Notificaciones {notif_badge}"
 
     body = f"""
-    <div class="grid">
-      <div class="card hero">
-        <div class="pill">⚡ Activación rápida</div>
-        <div class="pill" style="margin-left:8px;">🔒 Conexión privada</div>
-        <div class="pill" style="margin-left:8px;">📩 Soporte directo</div>
-        <div style="height:12px;"></div>
+    <div class="card hero">
+      <h1>Panel Cliente</h1>
+      <p>Gestiona tus proxies, pedidos, y soporte.</p>
+      <div class="hr"></div>
 
-        <h1>Gproxy — Panel Web</h1>
-        <p>Compra, renueva, sube voucher y gestiona soporte desde aquí.</p>
-        <div class="hr"></div>
-
-        <div class="row">
-          <a class="btn" href="/admin/login">🔐 Admin</a>
-          <a class="btn ghost" href="/client/login">👤 Clientes</a>
-          <a class="btn ghost" href="/client/signup">✨ Crear cuenta</a>
-          <a class="btn ghost" href="/support">💬 Soporte</a>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="muted">Estado del sistema</div>
-        <div class="kpi">{status}</div>
-        <div class="status" style="margin-top:10px;">
-          <span class="dot {dot_class}"></span>
-          <span>{html_escape(mtxt) if maint else "Todo funcionando perfecto."}</span>
-        </div>
-
-        <div class="hr"></div>
-        <div class="muted">Tips</div>
-        <p style="margin:8px 0 0 0; color: rgba(255,255,255,.78);">
-          Regístrate con teléfono + contraseña, y define un <b>PIN de recuperación</b> por si olvidas tu clave.
-        </p>
+      <div class="row">
+        <a class="btn" href="/buy">🛒 Comprar proxy</a>
+        <a class="btn" href="/renew">♻️ Renovar proxy</a>
+        <a class="btn ghost" href="/add-existing">➕ Agregar proxy existente</a>
+        <a class="btn ghost" href="/proxies">📦 Mis proxies</a>
+        <a class="btn ghost" href="/bank">🏦 Cuenta bancaria</a>
+        <a class="btn ghost" href="/notifications">{notif_btn}</a>
+        <a class="btn ghost" href="/logout" style="margin-left:auto;">🚪 Salir</a>
       </div>
     </div>
+
+    <h3 style="margin:18px 0 10px 0;">📦 Mis proxies (últimos 10)</h3>
+    {phtml}
+
+    <h3 style="margin:18px 0 10px 0;">📨 Mis pedidos (últimos 20)</h3>
+    <div class="card">
+      <table>
+        <tr>
+          <th>ID</th><th>Tipo</th><th>IP</th><th>Qty</th><th>Monto</th><th>Estado</th><th>Creado</th><th>Voucher</th>
+        </tr>
+        {ohtml}
+      </table>
+    </div>
+
+    <script>
+      function pad(n){{return String(n).padStart(2,'0');}}
+      function tick(){{
+        const els = document.querySelectorAll('[data-exp]');
+        const now = new Date().getTime();
+        els.forEach(el => {{
+          const s = el.getAttribute('data-exp');
+          if(!s) return;
+          let t = new Date(s.replace(' ', 'T')).getTime();
+          if (isNaN(t)) t = new Date(s.replace(' ', 'T') + 'Z').getTime();
+          let diff = Math.floor((t - now)/1000);
+          if (isNaN(diff)) {{ el.textContent='...'; return; }}
+          if (diff <= 0) {{ el.textContent='EXPIRADO'; return; }}
+          const days = Math.floor(diff / 86400);
+          diff -= days*86400;
+          const h = Math.floor(diff/3600); diff -= h*3600;
+          const m = Math.floor(diff/60); diff -= m*60;
+          const sec = diff;
+          el.textContent = (days>0? (days+'d ') : '') + pad(h)+':'+pad(m)+':'+pad(sec);
+        }});
+      }}
+      tick();
+      setInterval(tick, 1000);
+    </script>
     """
-    return page(APP_TITLE, body, subtitle="Premium Panel • Admin & Cliente")
+
+    return page("Cliente", body, subtitle="Tus proxies y pedidos")
 
 
 @app.get("/health")
