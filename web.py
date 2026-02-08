@@ -1134,27 +1134,34 @@ def admin_reset_do(
 # =========================
 # ADMIN: accounts
 # =========================
-@app.get("/admin/accounts", response_class=HTMLResponse)
-def admin_accounts(admin=Depends(require_admin), q: str = ""):
+@app.get("/admin/users", response_class=HTMLResponse)
+def admin_users(admin=Depends(require_admin), q: str = ""):
     q = (q or "").strip()
 
     def _do():
         conn = db_conn()
         cur = conn.cursor()
-        rows = []
-        try:
-            if q:
-                cur.execute(
-                    "SELECT user_id, username, is_blocked, last_seen FROM accounts "
-                    "WHERE CAST(user_id AS TEXT) LIKE ? OR username LIKE ? "
-                    "ORDER BY last_seen DESC LIMIT 80",
-                    (f"%{q}%", f"%{q}%"),
-                )
-            else:
-                cur.execute("SELECT user_id, username, is_blocked, last_seen FROM accounts ORDER BY last_seen DESC LIMIT 80")
-            rows = cur.fetchall()
-        except Exception:
-            rows = []
+        if q:
+            cur.execute(
+                """
+                SELECT id, phone, verified, created_at, updated_at
+                FROM accounts
+                WHERE CAST(id AS TEXT) LIKE ? OR phone LIKE ?
+                ORDER BY id DESC
+                LIMIT 200
+                """,
+                (f"%{q}%", f"%{q}%"),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT id, phone, verified, created_at, updated_at
+                FROM accounts
+                ORDER BY id DESC
+                LIMIT 200
+                """
+            )
+        rows = cur.fetchall()
         conn.close()
         return rows
 
@@ -1162,29 +1169,31 @@ def admin_accounts(admin=Depends(require_admin), q: str = ""):
 
     trs = ""
     for r in rows:
-        uid = int(r["user_id"])
-        uname = r["username"] or "-"
-        blocked = "🚫" if int(r["is_blocked"] or 0) == 1 else "✅"
-        last_seen = r["last_seen"] or "-"
+        verified = "✅ Verificado" if int(r["verified"] or 0) == 1 else "⏳ Sin verificar"
         trs += (
             "<tr>"
-            f"<td>{blocked}</td>"
-            f"<td><a class='btn ghost' href='/admin/user/{uid}'>👤 {uid}</a></td>"
-            f"<td>@{html_escape(uname)}</td>"
-            f"<td>{html_escape(last_seen)}</td>"
+            f"<td><code>{int(r['id'])}</code></td>"
+            f"<td>{html_escape(r['phone'] or '')}</td>"
+            f"<td>{verified}</td>"
+            f"<td>{html_escape(r['created_at'] or '')}</td>"
+            f"<td>{html_escape(r['updated_at'] or '')}</td>"
             "</tr>"
         )
 
     body = f"""
-    <div class="card">
+    <div class="card hero">
+      <h1>👥 Usuarios (Web)</h1>
+      <p>Clientes registrados en el panel web.</p>
+      <div class="hr"></div>
       <div class="row">
         <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
       </div>
-      <div class="hr"></div>
+    </div>
 
-      <form method="get" action="/admin/accounts">
-        <label class="muted">Buscar</label>
-        <input name="q" value="{html_escape(q)}" placeholder="Ej: 1915349159 o yudith"/>
+    <div class="card">
+      <form method="get" action="/admin/users">
+        <label class="muted">Buscar por ID o Teléfono</label>
+        <input name="q" value="{html_escape(q)}" placeholder="Ej: 1 o +1809..."/>
         <div style="height:12px;"></div>
         <button class="btn" type="submit">Buscar</button>
       </form>
@@ -1192,12 +1201,15 @@ def admin_accounts(admin=Depends(require_admin), q: str = ""):
 
     <div class="card">
       <table>
-        <tr><th>Estado</th><th>ID</th><th>Username</th><th>Last seen</th></tr>
-        {trs or "<tr><td colspan='4' class='muted'>Sin resultados</td></tr>"}
+        <tr>
+          <th>ID</th><th>Teléfono</th><th>Estado</th><th>Creado</th><th>Actualizado</th>
+        </tr>
+        {trs or "<tr><td colspan='5' class='muted'>No hay usuarios todavía.</td></tr>"}
       </table>
     </div>
     """
-    return page("Admin • Usuarios", body, subtitle="Gestión")
+    return page("Admin • Usuarios", body, subtitle="Cuentas Web")
+
 
 
 @app.post("/admin/user/{user_id}/toggle_block")
