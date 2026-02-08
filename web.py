@@ -2160,8 +2160,11 @@ def client_me(client=Depends(require_client)):
     if not ohtml:
         ohtml = "<tr><td colspan='8' class='muted'>No hay pedidos</td></tr>"
 
-    notif_badge = f"<span class='badge'>{unread}</span>" if unread else ""
+    # Botón de notificaciones
+notif_badge = f"<span class='badge'>{unread}</span>" if unread > 0 else ""
+
 ...
+
 <a class="btn ghost" href="/notifications">🔔 Notificaciones {notif_badge}</a>
 
 
