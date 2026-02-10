@@ -17,6 +17,8 @@ import base64
 import hashlib
 import sqlite3
 import secrets
+import smtplib
+from email.message import EmailMessage
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 
@@ -1562,7 +1564,7 @@ def admin_orders(admin=Depends(require_admin), state: str = ""):
         if tipo == "renew" and int(r["target_proxy_id"] or 0) > 0:
             extra = f" • Proxy #{int(r['target_proxy_id'])}"
 
-        deliver_box = ""
+                deliver_box = ""
         if tipo == "buy":
             deliver_box = f"""
               <div style="margin-top:8px;">
