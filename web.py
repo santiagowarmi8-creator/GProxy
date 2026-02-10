@@ -475,13 +475,14 @@ def ensure_schema() -> str:
     ins("currency", "DOP")
     ins("stock_available", "0")
 
-       # accounts
+    # accounts
     _ensure_table(
         conn,
         """
         CREATE TABLE IF NOT EXISTS accounts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             phone TEXT UNIQUE NOT NULL,
+            email TEXT NOT NULL DEFAULT '',
             password_hash TEXT NOT NULL,
             recovery_pin_hash TEXT NOT NULL DEFAULT '',
             verified INTEGER NOT NULL DEFAULT 0,
@@ -495,6 +496,7 @@ def ensure_schema() -> str:
 
     # Migraciones seguras para DB vieja (solo agrega si faltan)
     for col, coldef in [
+        ("email", "TEXT NOT NULL DEFAULT ''"),
         ("recovery_pin_hash", "TEXT NOT NULL DEFAULT ''"),
         ("verified", "INTEGER NOT NULL DEFAULT 0"),
         ("is_blocked", "INTEGER NOT NULL DEFAULT 0"),
@@ -1989,42 +1991,6 @@ def admin_ticket_reply(
 # =========================
 # CLIENT AUTH: SIGNUP / VERIFY / LOGIN / LOGOUT / RESET
 # =========================
-@app.get("/client/signup", response_class=HTMLResponse)
-def client_signup_page():
-    body = """
-    <div class="grid">
-      <div class="card">
-        <div class="kpi">Crear cuenta</div>
-        <p class="muted">Regístrate con Teléfono + Contraseña y define un PIN de recuperación.</p>
-      </div>
-      <div class="card">
-        <form method="post" action="/client/signup">
-	  <label class="muted">Gmail (opcional)</label>
-<input name="email" placeholder="tuemail@gmail.com"/>
-<div style="height:12px;"></div>
-          <label class="muted">Teléfono</label>
-          <input name="phone" placeholder="+1809..."/>
-          <div style="height:12px;"></div>
-
-          <label class="muted">Contraseña (mín 6)</label>
-          <input name="password" type="password" placeholder="••••••"/>
-          <div style="height:12px;"></div>
-
-          <label class="muted">PIN de recuperación (4-6 dígitos)</label>
-          <input name="recovery_pin" placeholder="Ej: 1234"/>
-          <div style="height:12px;"></div>
-
-          <button class="btn" type="submit">Crear cuenta</button>
-          <a class="btn ghost" href="/client/login" style="margin-left:10px;">🔐 Login</a>
-        </form>
-        <div class="hr"></div>
-        <p class="muted">¿Olvidaste tu clave? <a href="/client/reset" style="color:white;">Resetear contraseña</a></p>
-      </div>
-    </div>
-    """
-    return page("Cliente • Crear cuenta", body, subtitle="Registro seguro")
-
-
 @app.post("/client/signup", response_class=HTMLResponse)
 def client_signup(
     phone: str = Form(...),
@@ -2035,6 +2001,7 @@ def client_signup(
     phone = _normalize_phone(phone)
     password = (password or "").strip()
     recovery_pin = (recovery_pin or "").strip()
+    email = (email or "").strip()
 
     if not phone or len(phone) < 8:
         return nice_error_page("Datos inválidos", "Teléfono inválido.", "/client/signup", "↩️ Volver")
@@ -2046,6 +2013,7 @@ def client_signup(
     def _do():
         conn = db_conn()
         cur = conn.cursor()
+
         cur.execute("SELECT id FROM accounts WHERE phone=?", (phone,))
         if cur.fetchone():
             conn.close()
@@ -2054,10 +2022,11 @@ def client_signup(
         pwd_hash = password_make_hash(password)
         rec_hash = pin_hash(recovery_pin, PIN_SECRET)
 
+        # ✅ ahora guardamos email en accounts
         cur.execute(
-            "INSERT INTO accounts(phone,password_hash,recovery_pin_hash,verified,created_at,updated_at) "
-            "VALUES(?,?,?,?,?,?)",
-            (phone, pwd_hash, rec_hash, 0, now_str(), now_str()),
+            "INSERT INTO accounts(phone,email,password_hash,recovery_pin_hash,verified,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (phone, email, pwd_hash, rec_hash, 0, now_str(), now_str()),
         )
         conn.commit()
 
@@ -2095,7 +2064,6 @@ def client_signup(
     </div>
     """
     return page("Cliente • Verificación", body, subtitle="Confirmar cuenta")
-
 
 @app.post("/client/verify", response_class=HTMLResponse)
 def client_verify(phone: str = Form(...), pin: str = Form(...)):
