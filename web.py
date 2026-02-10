@@ -463,6 +463,16 @@ def ensure_schema() -> str:
     except Exception:
         pass
 
+# accounts (asegurar columnas aunque la DB sea vieja)
+_ensure_column(conn, "accounts", "phone", "TEXT UNIQUE")
+_ensure_column(conn, "accounts", "password_hash", "TEXT NOT NULL DEFAULT ''")
+_ensure_column(conn, "accounts", "recovery_pin_hash", "TEXT NOT NULL DEFAULT ''")
+_ensure_column(conn, "accounts", "verified", "INTEGER NOT NULL DEFAULT 0")
+_ensure_column(conn, "accounts", "created_at", "TEXT NOT NULL DEFAULT ''")
+_ensure_column(conn, "accounts", "updated_at", "TEXT NOT NULL DEFAULT ''")
+_ensure_column(conn, "accounts", "is_blocked", "INTEGER NOT NULL DEFAULT 0")
+_ensure_column(conn, "accounts", "last_seen", "TEXT NOT NULL DEFAULT ''")
+
     # signup_pins
     _ensure_table(
         conn,
@@ -1218,6 +1228,9 @@ def admin_reset_do(
 # =========================
 # ADMIN: accounts (FIXED)
 # =========================
+# =========================
+# ADMIN: accounts
+# =========================
 @app.get("/admin/accounts", response_class=HTMLResponse)
 @app.get("/admin/accounts/", response_class=HTMLResponse)
 def admin_accounts(admin=Depends(require_admin), q: str = ""):
@@ -1229,7 +1242,9 @@ def admin_accounts(admin=Depends(require_admin), q: str = ""):
         if q:
             cur.execute(
                 """
-                SELECT id, phone, verified, created_at, updated_at
+                SELECT id, phone, verified, created_at, updated_at,
+                       COALESCE(is_blocked,0) AS is_blocked,
+                       COALESCE(last_seen,'') AS last_seen
                 FROM accounts
                 WHERE CAST(id AS TEXT) LIKE ? OR phone LIKE ?
                 ORDER BY id DESC
@@ -1240,7 +1255,9 @@ def admin_accounts(admin=Depends(require_admin), q: str = ""):
         else:
             cur.execute(
                 """
-                SELECT id, phone, verified, created_at, updated_at
+                SELECT id, phone, verified, created_at, updated_at,
+                       COALESCE(is_blocked,0) AS is_blocked,
+                       COALESCE(last_seen,'') AS last_seen
                 FROM accounts
                 ORDER BY id DESC
                 LIMIT 200
@@ -1256,11 +1273,14 @@ def admin_accounts(admin=Depends(require_admin), q: str = ""):
     for r in rows:
         uid = int(r["id"])
         verified = "✅ Verificado" if int(r["verified"] or 0) == 1 else "⏳ Sin verificar"
+        blocked = "🚫 Bloqueado" if int(r["is_blocked"] or 0) == 1 else "✅ Activo"
+
         trs += (
             "<tr>"
             f"<td><code>{uid}</code></td>"
             f"<td>{html_escape(r['phone'] or '')}</td>"
             f"<td>{verified}</td>"
+            f"<td>{blocked}</td>"
             f"<td>{html_escape(r['created_at'] or '')}</td>"
             f"<td>{html_escape(r['updated_at'] or '')}</td>"
             f"<td><a class='btn ghost' href='/admin/user/{uid}'>Ver</a></td>"
@@ -1289,9 +1309,9 @@ def admin_accounts(admin=Depends(require_admin), q: str = ""):
     <div class="card">
       <table>
         <tr>
-          <th>ID</th><th>Teléfono</th><th>Estado</th><th>Creado</th><th>Actualizado</th><th></th>
+          <th>ID</th><th>Teléfono</th><th>Verificación</th><th>Estado</th><th>Creado</th><th>Actualizado</th><th></th>
         </tr>
-        {trs or "<tr><td colspan='6' class='muted'>No hay usuarios todavía.</td></tr>"}
+        {trs or "<tr><td colspan='7' class='muted'>No hay usuarios todavía.</td></tr>"}
       </table>
     </div>
     """
@@ -1303,24 +1323,17 @@ def admin_user_toggle_block(user_id: int, admin=Depends(require_admin)):
     def _do():
         conn = db_conn()
         cur = conn.cursor()
-
-        # Si la columna no existe, NO rompas (pero lo ideal es migrarla en schema)
-        try:
-            cur.execute("SELECT is_blocked FROM accounts WHERE id=?", (int(user_id),))
-            r = cur.fetchone()
-            if not r:
-                conn.close()
-                raise HTTPException(404, "Usuario no encontrado")
-            blocked = int(r["is_blocked"] or 0)
-            newv = 0 if blocked == 1 else 1
-            cur.execute("UPDATE accounts SET is_blocked=?, updated_at=? WHERE id=?", (newv, now_str(), int(user_id)))
-            conn.commit()
+        cur.execute("SELECT COALESCE(is_blocked,0) AS is_blocked FROM accounts WHERE id=?", (int(user_id),))
+        r = cur.fetchone()
+        if not r:
             conn.close()
-            return newv
-        except sqlite3.OperationalError:
-            conn.close()
-            # Columna no existe
-            raise HTTPException(500, "Falta columna accounts.is_blocked. Migra la DB en schema.")
+            raise HTTPException(404, "Usuario no encontrado")
+        blocked = int(r["is_blocked"] or 0)
+        newv = 0 if blocked == 1 else 1
+        cur.execute("UPDATE accounts SET is_blocked=?, updated_at=? WHERE id=?", (newv, now_str(), int(user_id)))
+        conn.commit()
+        conn.close()
+        return newv
 
     newv = _retry_sqlite(_do)
     admin_log("user_toggle_block", json.dumps({"user_id": user_id, "is_blocked": newv}, ensure_ascii=False))
@@ -1333,21 +1346,19 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
         conn = db_conn()
         cur = conn.cursor()
 
-        # Usuario (tabla REAL)
-        cur.execute("SELECT id, phone, verified, created_at, updated_at FROM accounts WHERE id=?", (int(user_id),))
+        cur.execute(
+            """
+            SELECT id, phone, verified,
+                   COALESCE(is_blocked,0) AS is_blocked,
+                   COALESCE(last_seen,'') AS last_seen,
+                   created_at, updated_at
+            FROM accounts
+            WHERE id=?
+            """,
+            (int(user_id),),
+        )
         u = cur.fetchone()
 
-        # blocked opcional
-        is_blocked = 0
-        try:
-            cur.execute("SELECT is_blocked FROM accounts WHERE id=?", (int(user_id),))
-            rr = cur.fetchone()
-            if rr:
-                is_blocked = int(rr["is_blocked"] or 0)
-        except Exception:
-            is_blocked = 0
-
-        # Proxies del bot (si existe)
         proxies_rows = []
         try:
             cur.execute("SELECT id, ip, vence, estado FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 50", (int(user_id),))
@@ -1355,11 +1366,10 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
         except Exception:
             proxies_rows = []
 
-        # Pedidos del bot (si existe)
         req_rows = []
         try:
             cur.execute(
-                "SELECT id, tipo, ip, cantidad, monto, estado, created_at, voucher_path "
+                "SELECT id, tipo, ip, cantidad, monto, estado, created_at, voucher_path, target_proxy_id "
                 "FROM requests WHERE user_id=? ORDER BY id DESC LIMIT 50",
                 (int(user_id),),
             )
@@ -1368,15 +1378,15 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
             req_rows = []
 
         conn.close()
-        return u, is_blocked, proxies_rows, req_rows
+        return u, proxies_rows, req_rows
 
-    u, is_blocked, proxies_rows, req_rows = _retry_sqlite(_do)
+    u, proxies_rows, req_rows = _retry_sqlite(_do)
 
     if not u:
         return nice_error_page("Usuario", "No encontré ese usuario.", "/admin/accounts", "⬅️ Volver")
 
-    tag = "🚫 BLOQUEADO" if is_blocked == 1 else "✅ ACTIVO"
-    verified = "✅ Verificado" if int(u["verified"] or 0) == 1 else "⏳ Sin verificar"
+    blocked = int(u["is_blocked"] or 0)
+    tag = "🚫 BLOQUEADO" if blocked == 1 else "✅ ACTIVO"
 
     phtml = ""
     for r in proxies_rows:
@@ -1395,10 +1405,15 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
     for r in req_rows:
         voucher = (r["voucher_path"] or "").strip()
         voucher_cell = f"<a href='/static/{html_escape(voucher)}' target='_blank'>ver</a>" if voucher else "-"
+
+        extra = ""
+        if (r["tipo"] or "") == "renew" and int(r["target_proxy_id"] or 0) > 0:
+            extra = f" • Proxy #{int(r['target_proxy_id'])}"
+
         ohtml += (
             "<tr>"
             f"<td>#{int(r['id'])}</td>"
-            f"<td>{html_escape(r['tipo'] or '')}</td>"
+            f"<td>{html_escape((r['tipo'] or '') + extra)}</td>"
             f"<td>{html_escape(r['ip'] or '-')}</td>"
             f"<td>{int(r['cantidad'] or 0)}</td>"
             f"<td>{html_escape(str(r['monto'] or '0'))}</td>"
@@ -1410,8 +1425,8 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
     if not ohtml:
         ohtml = "<tr><td colspan='8' class='muted'>No hay pedidos</td></tr>"
 
-    toggle_label = "🔓 Desbloquear" if is_blocked == 1 else "⛔ Bloquear"
-    toggle_class = "btn" if is_blocked == 1 else "btn bad"
+    toggle_label = "🔓 Desbloquear" if blocked == 1 else "⛔ Bloquear"
+    toggle_class = "btn" if blocked == 1 else "btn bad"
 
     body = f"""
     <div class="card">
@@ -1427,8 +1442,8 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
       <div class="hr"></div>
       <div class="muted">Usuario</div>
       <div class="kpi">{int(user_id)}</div>
-      <p class="muted">{html_escape(u['phone'] or '')} • {verified} • {tag}</p>
-      <p class="muted">Creado: {html_escape(u['created_at'] or '')} • Actualizado: {html_escape(u['updated_at'] or '')}</p>
+      <p class="muted">{html_escape(u['phone'] or '')} • {tag}</p>
+      <p class="muted">Última vez: {html_escape(u['last_seen'] or '-')}</p>
     </div>
 
     <div class="card">
@@ -1460,17 +1475,16 @@ def admin_orders(admin=Depends(require_admin), state: str = ""):
     def _do():
         conn = db_conn()
         cur = conn.cursor()
-        rows = []
         try:
             if state:
                 cur.execute(
-                    "SELECT id,user_id,tipo,ip,cantidad,monto,estado,created_at,voucher_path,target_proxy_id "
+                    "SELECT id,user_id,tipo,ip,cantidad,monto,estado,created_at,voucher_path,target_proxy_id,note "
                     "FROM requests WHERE estado=? ORDER BY id DESC LIMIT 160",
                     (state,),
                 )
             else:
                 cur.execute(
-                    "SELECT id,user_id,tipo,ip,cantidad,monto,estado,created_at,voucher_path,target_proxy_id "
+                    "SELECT id,user_id,tipo,ip,cantidad,monto,estado,created_at,voucher_path,target_proxy_id,note "
                     "FROM requests ORDER BY id DESC LIMIT 160"
                 )
             rows = cur.fetchall()
@@ -1488,23 +1502,24 @@ def admin_orders(admin=Depends(require_admin), state: str = ""):
         rid = int(r["id"])
         uid = int(r["user_id"])
         tipo = (r["tipo"] or "").strip()
+        qty = int(r["cantidad"] or 0)
 
         extra = ""
         if tipo == "renew" and int(r["target_proxy_id"] or 0) > 0:
             extra = f" • Proxy #{int(r['target_proxy_id'])}"
 
-        delivery_box = ""
+        deliver_box = ""
         if tipo == "buy":
-            delivery_box = """
-            <div style="margin-top:8px;">
-              <div class="muted">📌 Pega aquí las proxies a entregar (1 por línea).</div>
-              <textarea name="delivery_raw" placeholder="ip:port:user:pass&#10;ip:port:user:pass" style="min-height:90px;"></textarea>
-            </div>
+            deliver_box = f"""
+              <div style="margin-top:8px;">
+                <label class="muted">Pega aquí {qty} proxies (RAW) — 1 por línea</label>
+                <textarea name="deliver_raw" placeholder="HTTP&#10;ip:port:user:pass&#10;HTTP&#10;ip:port:user:pass"></textarea>
+              </div>
             """
 
         approve_form = f"""
-          <form method="post" action="/admin/order/{rid}/approve" style="display:inline; width:100%;">
-            {delivery_box}
+          <form method="post" action="/admin/order/{rid}/approve" style="display:inline; min-width:320px;">
+            {deliver_box}
             <button class="btn" type="submit" style="margin-top:8px;">✅ Aprobar</button>
           </form>
         """
@@ -1520,12 +1535,12 @@ def admin_orders(admin=Depends(require_admin), state: str = ""):
             f"<td><a class='btn ghost' href='/admin/user/{uid}'>👤 {uid}</a></td>"
             f"<td>{html_escape(tipo)}{html_escape(extra)}</td>"
             f"<td>{html_escape(r['ip'] or '-')}</td>"
-            f"<td>{int(r['cantidad'] or 0)}</td>"
+            f"<td>{qty}</td>"
             f"<td>{html_escape(str(r['monto'] or '0'))}</td>"
             f"<td>{html_escape(r['estado'] or '')}</td>"
             f"<td>{html_escape(r['created_at'] or '')}</td>"
             f"<td>{voucher_cell}</td>"
-            f"<td style='min-width:260px;'>{approve_form}{reject_form}</td>"
+            f"<td>{approve_form}{reject_form}</td>"
             "</tr>"
         )
 
@@ -2126,6 +2141,14 @@ def client_login(phone: str = Form(...), password: str = Form(...)):
             "/client/login",
             "↩️ Intentar de nuevo",
         )
+
+def _touch():
+    conn = db_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE accounts SET last_seen=?, updated_at=? WHERE id=?", (now_str(), now_str(), int(uid)))
+    conn.commit()
+    conn.close()
+_retry_sqlite(_touch)
 
     session = sign({"role": "client", "uid": int(uid)}, CLIENT_SECRET, exp_seconds=7 * 24 * 3600)
     resp = RedirectResponse(url="/me", status_code=302)
