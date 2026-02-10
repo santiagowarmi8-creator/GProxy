@@ -39,7 +39,7 @@ ENABLE_OUTBOX = os.getenv("ENABLE_OUTBOX", "1").strip() == "1"
 PIN_SECRET = os.getenv("PIN_SECRET", "").strip()
 
 COOKIE_SECURE = (os.getenv("COOKIE_SECURE", "1").strip() == "1")
-COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax").strip()
+COOKIE_SAMESITE = (os.getenv("COOKIE_SAMESITE", "lax").strip() or "lax")
 
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
 VOUCHER_DIR = os.path.join(UPLOAD_DIR, "vouchers")
@@ -49,6 +49,22 @@ DEFAULT_DIAS_PROXY = 30
 
 os.makedirs(VOUCHER_DIR, exist_ok=True)
 os.makedirs(INVOICE_DIR, exist_ok=True)
+
+
+def _normalize_samesite(value: str) -> str:
+    """
+    FastAPI/Starlette acepta: 'lax', 'strict', 'none'.
+    Si es inválido, usamos 'lax'. Si es 'none', forzamos secure=True (requisito de navegadores modernos).
+    """
+    v = (value or "").strip().lower()
+    if v not in ("lax", "strict", "none"):
+        v = "lax"
+    return v
+
+
+COOKIE_SAMESITE = _normalize_samesite(COOKIE_SAMESITE)
+if COOKIE_SAMESITE == "none":
+    COOKIE_SECURE = True
 
 
 # =========================
@@ -260,6 +276,41 @@ def require_admin(request: Request) -> Dict[str, Any]:
     return payload
 
 
+def _account_is_blocked_and_touch_last_seen(uid: int) -> bool:
+    """
+    - Devuelve True si el usuario está bloqueado.
+    - Además actualiza last_seen para auditoría (si la columna existe).
+    """
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+
+        # is_blocked puede no existir en DB viejas hasta que corra ensure_schema()
+        blocked = 0
+        try:
+            cur.execute("SELECT is_blocked FROM accounts WHERE id=?", (int(uid),))
+            row = cur.fetchone()
+            if row is None:
+                conn.close()
+                return True  # si no existe la cuenta, tratamos como bloqueado/no válido
+            blocked = int(row["is_blocked"] or 0)
+        except Exception:
+            # si la columna no existe todavía, no bloqueamos aquí
+            blocked = 0
+
+        # touch last_seen (si existe)
+        try:
+            cur.execute("UPDATE accounts SET last_seen=?, updated_at=? WHERE id=?", (now_str(), now_str(), int(uid)))
+            conn.commit()
+        except Exception:
+            pass
+
+        conn.close()
+        return blocked == 1
+
+    return _retry_sqlite(_do)
+
+
 def require_client(request: Request) -> Dict[str, Any]:
     if not CLIENT_SECRET:
         raise HTTPException(503, "Servidor ocupado. Intenta de nuevo.")
@@ -267,6 +318,15 @@ def require_client(request: Request) -> Dict[str, Any]:
     payload = verify(tok, CLIENT_SECRET)
     if payload.get("role") != "client":
         raise HTTPException(401, "No autorizado")
+
+    uid = int(payload.get("uid") or 0)
+    if uid <= 0:
+        raise HTTPException(401, "No autorizado")
+
+    # Bloqueo real (si el admin lo activó)
+    if _account_is_blocked_and_touch_last_seen(uid):
+        raise HTTPException(403, "Tu cuenta está bloqueada. Contacta soporte.")
+
     return payload
 
 
@@ -277,6 +337,11 @@ def try_client(request: Request) -> Optional[Dict[str, Any]]:
         tok = request.cookies.get("client_session", "")
         payload = verify(tok, CLIENT_SECRET)
         if payload.get("role") != "client":
+            return None
+        uid = int(payload.get("uid") or 0)
+        if uid <= 0:
+            return None
+        if _account_is_blocked_and_touch_last_seen(uid):
             return None
         return payload
     except Exception:
@@ -387,6 +452,16 @@ def ensure_schema() -> str:
         """,
     )
     _ensure_column(conn, "accounts", "recovery_pin_hash", "TEXT NOT NULL DEFAULT ''")
+
+    # ✅ NUEVO: columnas para bloqueo y auditoría (compatibles con DB vieja)
+    try:
+        _ensure_column(conn, "accounts", "is_blocked", "INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        _ensure_column(conn, "accounts", "last_seen", "TEXT NOT NULL DEFAULT ''")
+    except Exception:
+        pass
 
     # signup_pins
     _ensure_table(
@@ -824,7 +899,7 @@ def admin_dashboard(admin=Depends(require_admin)):
         return _retry_sqlite(_do)
 
     accounts = count("SELECT COUNT(*) FROM accounts")
-  # del bot (si existe)
+    # del bot (si existe)
     proxies = count("SELECT COUNT(*) FROM proxies")
     pending = count("SELECT COUNT(*) FROM requests WHERE estado IN ('awaiting_voucher','voucher_received','awaiting_admin_verify')")
     tickets = count("SELECT COUNT(*) FROM tickets WHERE status='open'")
@@ -1100,8 +1175,10 @@ def admin_reset_do(
         cur = conn.cursor()
 
         if wipe_requests == "1":
-            try: cur.execute("DELETE FROM requests")
-            except Exception: pass
+            try:
+                cur.execute("DELETE FROM requests")
+            except Exception:
+                pass
 
         if wipe_tickets == "1":
             cur.execute("DELETE FROM tickets")
@@ -1113,31 +1190,42 @@ def admin_reset_do(
             cur.execute("UPDATE settings SET value=?, updated_at=? WHERE key='stock_available'", ("0", now_str()))
 
         if wipe_proxies == "1":
-            try: cur.execute("DELETE FROM proxies")
-            except Exception: pass
+            try:
+                cur.execute("DELETE FROM proxies")
+            except Exception:
+                pass
 
         conn.commit()
         conn.close()
 
     _retry_sqlite(_do)
-    admin_log("admin_reset", json.dumps({
-        "requests": wipe_requests == "1",
-        "tickets": wipe_tickets == "1",
-        "notifications": wipe_notifications == "1",
-        "stock": wipe_stock == "1",
-        "proxies": wipe_proxies == "1",
-    }, ensure_ascii=False))
+    admin_log(
+        "admin_reset",
+        json.dumps(
+            {
+                "requests": wipe_requests == "1",
+                "tickets": wipe_tickets == "1",
+                "notifications": wipe_notifications == "1",
+                "stock": wipe_stock == "1",
+                "proxies": wipe_proxies == "1",
+            },
+            ensure_ascii=False,
+        ),
+    )
 
     return nice_error_page("Limpieza lista", "Se aplicó la limpieza seleccionada.", "/admin", "⬅️ Volver al Dashboard")
-
 
 # =========================
 # ADMIN: accounts
 # =========================
+
+def _normalize_phone(phone: str) -> str:
+    # Normaliza espacios; no cambia formato (para no romper tus datos viejos).
+    return (phone or "").strip()
+
+
 @app.get("/admin/accounts", response_class=HTMLResponse)
 @app.get("/admin/accounts/", response_class=HTMLResponse)
-def admin_accounts(admin=Depends(require_admin), q: str = ""):
-    ...
 def admin_accounts(admin=Depends(require_admin), q: str = ""):
     q = (q or "").strip()
 
@@ -1147,7 +1235,10 @@ def admin_accounts(admin=Depends(require_admin), q: str = ""):
         if q:
             cur.execute(
                 """
-                SELECT id, phone, verified, created_at, updated_at
+                SELECT id, phone, verified,
+                       COALESCE(is_blocked,0) AS is_blocked,
+                       COALESCE(username,'') AS username,
+                       created_at, updated_at
                 FROM accounts
                 WHERE CAST(id AS TEXT) LIKE ? OR phone LIKE ?
                 ORDER BY id DESC
@@ -1158,7 +1249,10 @@ def admin_accounts(admin=Depends(require_admin), q: str = ""):
         else:
             cur.execute(
                 """
-                SELECT id, phone, verified, created_at, updated_at
+                SELECT id, phone, verified,
+                       COALESCE(is_blocked,0) AS is_blocked,
+                       COALESCE(username,'') AS username,
+                       created_at, updated_at
                 FROM accounts
                 ORDER BY id DESC
                 LIMIT 200
@@ -1173,13 +1267,16 @@ def admin_accounts(admin=Depends(require_admin), q: str = ""):
     trs = ""
     for r in rows:
         verified = "✅ Verificado" if int(r["verified"] or 0) == 1 else "⏳ Sin verificar"
+        blocked = "🚫 Bloqueado" if int(r["is_blocked"] or 0) == 1 else "✅ Activo"
+        uname = (r["username"] or "").strip() or "-"
         trs += (
             "<tr>"
             f"<td><code>{int(r['id'])}</code></td>"
-            f"<td>{html_escape(r['phone'] or '')}</td>"
-            f"<td>{verified}</td>"
+            f"<td>{html_escape(r['phone'] or '')}<div class='muted'>@{html_escape(uname)}</div></td>"
+            f"<td>{verified}<div class='muted'>{blocked}</div></td>"
             f"<td>{html_escape(r['created_at'] or '')}</td>"
             f"<td>{html_escape(r['updated_at'] or '')}</td>"
+            f"<td><a class='btn ghost' href='/admin/user/{int(r['id'])}'>Ver</a></td>"
             "</tr>"
         )
 
@@ -1205,14 +1302,13 @@ def admin_accounts(admin=Depends(require_admin), q: str = ""):
     <div class="card">
       <table>
         <tr>
-          <th>ID</th><th>Teléfono</th><th>Estado</th><th>Creado</th><th>Actualizado</th>
+          <th>ID</th><th>Teléfono</th><th>Estado</th><th>Creado</th><th>Actualizado</th><th></th>
         </tr>
-        {trs or "<tr><td colspan='5' class='muted'>No hay usuarios todavía.</td></tr>"}
+        {trs or "<tr><td colspan='6' class='muted'>No hay usuarios todavía.</td></tr>"}
       </table>
     </div>
     """
     return page("Admin • Usuarios", body, subtitle="Cuentas Web")
-
 
 
 @app.post("/admin/user/{user_id}/toggle_block")
@@ -1220,14 +1316,15 @@ def admin_user_toggle_block(user_id: int, admin=Depends(require_admin)):
     def _do():
         conn = db_conn()
         cur = conn.cursor()
-        cur.execute("SELECT is_blocked FROM accounts WHERE user_id=?", (int(user_id),))
+        # OJO: la tabla accounts usa "id" (no user_id)
+        cur.execute("SELECT id, COALESCE(is_blocked,0) AS is_blocked FROM accounts WHERE id=?", (int(user_id),))
         r = cur.fetchone()
         if not r:
             conn.close()
             raise HTTPException(404, "Usuario no encontrado")
         blocked = int(r["is_blocked"] or 0)
         newv = 0 if blocked == 1 else 1
-        cur.execute("UPDATE accounts SET is_blocked=? WHERE user_id=?", (newv, int(user_id)))
+        cur.execute("UPDATE accounts SET is_blocked=?, updated_at=? WHERE id=?", (newv, now_str(), int(user_id)))
         conn.commit()
         conn.close()
         return newv
@@ -1243,12 +1340,20 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
         conn = db_conn()
         cur = conn.cursor()
 
-        u = None
-        try:
-            cur.execute("SELECT user_id, username, is_blocked, created_at, last_seen FROM accounts WHERE user_id=?", (int(user_id),))
-            u = cur.fetchone()
-        except Exception:
-            u = None
+        # OJO: accounts usa "id"
+        cur.execute(
+            """
+            SELECT id, phone, verified,
+                   COALESCE(username,'') AS username,
+                   COALESCE(is_blocked,0) AS is_blocked,
+                   COALESCE(last_seen,'') AS last_seen,
+                   created_at, updated_at
+            FROM accounts
+            WHERE id=?
+            """,
+            (int(user_id),),
+        )
+        u = cur.fetchone()
 
         proxies_rows = []
         try:
@@ -1276,7 +1381,9 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
     if not u:
         return nice_error_page("Usuario", "No encontré ese usuario.", "/admin/accounts", "⬅️ Volver")
 
-    uname = u["username"] or "-"
+    uname = (u["username"] or "").strip() or "-"
+    phone = u["phone"] or "-"
+    verified = "✅ Verificado" if int(u["verified"] or 0) == 1 else "⏳ Sin verificar"
     blocked = int(u["is_blocked"] or 0)
     tag = "🚫 BLOQUEADO" if blocked == 1 else "✅ ACTIVO"
 
@@ -1329,7 +1436,8 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
       <div class="hr"></div>
       <div class="muted">Usuario</div>
       <div class="kpi">{int(user_id)}</div>
-      <p class="muted">@{html_escape(uname)} • {tag}</p>
+      <p class="muted">{html_escape(phone)} • @{html_escape(uname)} • {verified} • {tag}</p>
+      <p class="muted">Última actividad: {html_escape(u['last_seen'] or '-')}</p>
     </div>
 
     <div class="card">
@@ -1526,8 +1634,7 @@ def admin_order_approve(rid: int, admin=Depends(require_admin)):
         target_proxy_id = int(req["target_proxy_id"] or 0)
         note = (req["note"] or "").strip()
 
-        # IMPORTANTE: primero marcamos estado y hacemos entregas en la MISMA conexión,
-        # así reducimos locks.
+        # entregas dentro de la misma conexión (menos locks)
         if tipo == "buy":
             ok = _deliver_buy_only_count(qty)
             if not ok:
@@ -1545,7 +1652,7 @@ def admin_order_approve(rid: int, admin=Depends(require_admin)):
         conn.commit()
         conn.close()
 
-        # notificaciones fuera de la transacción (ya sin lock)
+        # notificaciones fuera de la transacción
         if tipo == "buy":
             notify_user(uid, f"✅ Tu compra fue aprobada. Proxies: {qty}.")
         elif tipo == "renew":
@@ -1681,6 +1788,7 @@ def admin_tickets(admin=Depends(require_admin), state: str = "open"):
           <pre>{html_escape(t['message'] or '')}</pre>
           <div class="hr"></div>
           <form method="post" action="/admin/ticket/{int(t['id'])}/reply">
+            <input type="hidden" name="return_state" value="{html_escape(state)}"/>
             <label class="muted">Respuesta</label>
             <textarea name="reply" placeholder="Escribe respuesta...">{html_escape(t['admin_reply'] or '')}</textarea>
             <div style="height:12px;"></div>
@@ -1710,8 +1818,15 @@ def admin_tickets(admin=Depends(require_admin), state: str = "open"):
 
 
 @app.post("/admin/ticket/{tid}/reply")
-def admin_ticket_reply(tid: int, reply: str = Form(""), action: str = Form("reply"), admin=Depends(require_admin)):
+def admin_ticket_reply(
+    tid: int,
+    reply: str = Form(""),
+    action: str = Form("reply"),
+    return_state: str = Form("open"),
+    admin=Depends(require_admin),
+):
     reply = (reply or "").strip()
+    return_state = (return_state or "open").strip() or "open"
 
     def _do():
         conn = db_conn()
@@ -1744,7 +1859,7 @@ def admin_ticket_reply(tid: int, reply: str = Form(""), action: str = Form("repl
         admin_log("ticket_reply", json.dumps({"tid": tid}, ensure_ascii=False))
 
     _retry_sqlite(_do)
-    return RedirectResponse(url="/admin/tickets?state=open", status_code=302)
+    return RedirectResponse(url=f"/admin/tickets?state={html_escape(return_state)}", status_code=302)
 
 
 # =========================
@@ -1785,7 +1900,7 @@ def client_signup_page():
 
 @app.post("/client/signup", response_class=HTMLResponse)
 def client_signup(phone: str = Form(...), password: str = Form(...), recovery_pin: str = Form(...)):
-    phone = (phone or "").strip()
+    phone = _normalize_phone(phone)
     password = (password or "").strip()
     recovery_pin = (recovery_pin or "").strip()
 
@@ -1852,7 +1967,7 @@ def client_signup(phone: str = Form(...), password: str = Form(...), recovery_pi
 
 @app.post("/client/verify", response_class=HTMLResponse)
 def client_verify(phone: str = Form(...), pin: str = Form(...)):
-    phone = (phone or "").strip()
+    phone = _normalize_phone(phone)
     pin = (pin or "").strip()
 
     def _do():
@@ -1941,13 +2056,16 @@ def client_login_page():
 
 
 def account_verify_login(phone: str, password: str) -> Optional[int]:
-    phone = (phone or "").strip()
+    phone = _normalize_phone(phone)
     password = (password or "").strip()
 
     def _do():
         conn = db_conn()
         cur = conn.cursor()
-        cur.execute("SELECT id, password_hash, verified FROM accounts WHERE phone=?", (phone,))
+        cur.execute(
+            "SELECT id, password_hash, verified, COALESCE(is_blocked,0) AS is_blocked FROM accounts WHERE phone=?",
+            (phone,),
+        )
         row = cur.fetchone()
         conn.close()
         return row
@@ -1956,6 +2074,8 @@ def account_verify_login(phone: str, password: str) -> Optional[int]:
     if not row:
         return None
     if int(row["verified"] or 0) != 1:
+        return None
+    if int(row["is_blocked"] or 0) == 1:
         return None
     if not password_check(password, (row["password_hash"] or "")):
         return None
@@ -1966,7 +2086,12 @@ def account_verify_login(phone: str, password: str) -> Optional[int]:
 def client_login(phone: str = Form(...), password: str = Form(...)):
     uid = account_verify_login(phone, password)
     if not uid:
-        return nice_error_page("Login inválido", "Teléfono/contraseña incorrectos o cuenta no verificada.", "/client/login", "↩️ Intentar de nuevo")
+        return nice_error_page(
+            "Login inválido",
+            "Teléfono/contraseña incorrectos, cuenta no verificada o bloqueada.",
+            "/client/login",
+            "↩️ Intentar de nuevo",
+        )
 
     session = sign({"role": "client", "uid": int(uid)}, CLIENT_SECRET, exp_seconds=7 * 24 * 3600)
     resp = RedirectResponse(url="/me", status_code=302)
@@ -2015,7 +2140,7 @@ def client_reset_page():
 
 @app.post("/client/reset", response_class=HTMLResponse)
 def client_reset_submit(phone: str = Form(...), recovery_pin: str = Form(...), new_password: str = Form(...)):
-    phone = (phone or "").strip()
+    phone = _normalize_phone(phone)
     recovery_pin = (recovery_pin or "").strip()
     new_password = (new_password or "").strip()
 
@@ -2053,7 +2178,6 @@ def client_reset_submit(phone: str = Form(...), recovery_pin: str = Form(...), n
 
     return nice_error_page("Contraseña actualizada", "Ya puedes iniciar sesión con tu nueva contraseña.", "/client/login", "🔐 Iniciar sesión")
 
-
 # =========================
 # CLIENT PANEL: /me (SINGLE, FIXED)
 # =========================
@@ -2070,12 +2194,22 @@ def client_me(client=Depends(require_client)):
         conn = db_conn()
         cur = conn.cursor()
 
+        # (MEJORA) guardar last_seen si la columna existe (no rompe si no existe)
+        try:
+            cur.execute("UPDATE accounts SET last_seen=?, updated_at=? WHERE id=?", (now_str(), now_str(), uid))
+            conn.commit()
+        except Exception:
+            pass
+
         cur.execute("SELECT COUNT(*) FROM notifications WHERE user_id=? AND seen=0", (uid,))
         unread = int(cur.fetchone()[0])
 
         proxies_rows = []
         try:
-            cur.execute("SELECT id, ip, inicio, vence, estado, raw FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 10", (uid,))
+            cur.execute(
+                "SELECT id, ip, inicio, vence, estado, raw FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 10",
+                (uid,),
+            )
             proxies_rows = cur.fetchall()
         except Exception:
             proxies_rows = []
@@ -2104,7 +2238,11 @@ def client_me(client=Depends(require_client)):
         proxy_text = raw or ("HTTP\n" + (r["ip"] or ""))
 
         vence = (r["vence"] or "").strip()
-        countdown = f"<span class='badge' data-exp='{html_escape(vence)}'>...</span>" if vence else "<span class='badge'>-</span>"
+        countdown = (
+            f"<span class='badge' data-exp='{html_escape(vence)}'>...</span>"
+            if vence
+            else "<span class='badge'>-</span>"
+        )
 
         phtml += f"""
         <div class="card">
@@ -2123,7 +2261,6 @@ def client_me(client=Depends(require_client)):
     if not phtml:
         phtml = "<div class='card'><p class='muted'>No tienes proxies todavía.</p></div>"
 
-    # FIX REAL: ohtml construido correctamente (sin syntax error)
     ohtml = ""
     for r in orders_rows:
         voucher = (r["voucher_path"] or "").strip()
@@ -2179,16 +2316,27 @@ def client_me(client=Depends(require_client)):
 
     <script>
       function pad(n){{return String(n).padStart(2,'0');}}
+
+      // (FIX) Parse robusto: la fecha viene como "YYYY-MM-DD HH:MM:SS"
+      // La interpretamos como hora LOCAL del servidor/cliente (consistente).
+      function parseExp(s){{
+        if(!s) return NaN;
+        const parts = s.trim().split(' ');
+        if(parts.length !== 2) return Date.parse(s);
+        const d = parts[0].split('-').map(Number);
+        const t = parts[1].split(':').map(Number);
+        if(d.length!==3 || t.length!==3) return Date.parse(s);
+        return new Date(d[0], d[1]-1, d[2], t[0], t[1], t[2]).getTime();
+      }}
+
       function tick(){{
         const els = document.querySelectorAll('[data-exp]');
-        const now = new Date().getTime();
+        const now = Date.now();
         els.forEach(el => {{
           const s = el.getAttribute('data-exp');
-          if(!s) return;
-          let t = new Date(s.replace(' ', 'T')).getTime();
-          if (isNaN(t)) t = new Date(s.replace(' ', 'T') + 'Z').getTime();
+          const t = parseExp(s);
+          if (isNaN(t)) {{ el.textContent='...'; return; }}
           let diff = Math.floor((t - now)/1000);
-          if (isNaN(diff)) {{ el.textContent='...'; return; }}
           if (diff <= 0) {{ el.textContent='EXPIRADO'; return; }}
           const days = Math.floor(diff / 86400);
           diff -= days*86400;
@@ -2236,7 +2384,10 @@ def client_proxies(client=Depends(require_client)):
         cur = conn.cursor()
         rows = []
         try:
-            cur.execute("SELECT id, ip, inicio, vence, estado, raw FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 300", (uid,))
+            cur.execute(
+                "SELECT id, ip, inicio, vence, estado, raw FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 300",
+                (uid,),
+            )
             rows = cur.fetchall()
         except Exception:
             rows = []
@@ -2290,7 +2441,10 @@ def client_notifications(client=Depends(require_client)):
     def _do():
         conn = db_conn()
         cur = conn.cursor()
-        cur.execute("SELECT id,message,seen,created_at FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 200", (uid,))
+        cur.execute(
+            "SELECT id,message,seen,created_at FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 200",
+            (uid,),
+        )
         rows = cur.fetchall()
         conn.close()
         return rows
@@ -2319,10 +2473,7 @@ def client_notifications(client=Depends(require_client)):
         def _mark():
             conn = db_conn()
             cur = conn.cursor()
-            cur.execute(
-                f"UPDATE notifications SET seen=1 WHERE user_id=? AND seen=0",
-                (uid,),
-            )
+            cur.execute("UPDATE notifications SET seen=1 WHERE user_id=? AND seen=0", (uid,))
             conn.commit()
             conn.close()
         _retry_sqlite(_mark)
@@ -2395,6 +2546,8 @@ def client_buy_submit(cantidad: str = Form("1"), email: str = Form(""), client=D
         qty = int(float((cantidad or "1").strip()))
         if qty <= 0:
             qty = 1
+        if qty > 50:
+            qty = 50
     except Exception:
         qty = 1
 
@@ -2601,7 +2754,7 @@ def client_order_voucher(rid: int, file: UploadFile = File(...), client=Depends(
     def _check_order():
         conn = db_conn()
         cur = conn.cursor()
-        cur.execute("SELECT id,user_id FROM requests WHERE id=?", (int(rid),))
+        cur.execute("SELECT id,user_id,estado FROM requests WHERE id=?", (int(rid),))
         r = cur.fetchone()
         conn.close()
         return r
@@ -2609,6 +2762,11 @@ def client_order_voucher(rid: int, file: UploadFile = File(...), client=Depends(
     r = _retry_sqlite(_check_order)
     if not r or int(r["user_id"]) != uid:
         raise HTTPException(404, "Pedido no encontrado.")
+
+    # (MEJORA) solo permitir subir voucher en estados correctos
+    estado = (r["estado"] or "").strip()
+    if estado not in ("awaiting_voucher", "voucher_received"):
+        return nice_error_page("No permitido", f"Este pedido está en estado '{estado}' y no admite voucher.", f"/order/{rid}/pay", "↩️ Volver")
 
     ext = os.path.splitext(file.filename)[1].lower().strip()
     if ext not in [".jpg", ".jpeg", ".png", ".webp"]:
