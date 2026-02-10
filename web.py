@@ -18,13 +18,13 @@ import hashlib
 import sqlite3
 import secrets
 import smtplib
-from email.message import EmailMessage
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 
 from fastapi import FastAPI, Depends, HTTPException, Request, Form, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from email.message import EmailMessage
 
 import smtplib
 from email.message import EmailMessage
@@ -3229,6 +3229,7 @@ def api_outbox(admin=Depends(require_admin)):
 
     rows = _retry_sqlite(_do)
     return {"enabled": True, "items": rows}
+
 
 
 
