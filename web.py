@@ -1216,14 +1216,8 @@ def admin_reset_do(
     return nice_error_page("Limpieza lista", "Se aplicó la limpieza seleccionada.", "/admin", "⬅️ Volver al Dashboard")
 
 # =========================
-# ADMIN: accounts
+# ADMIN: accounts (FIXED)
 # =========================
-
-def _normalize_phone(phone: str) -> str:
-    # Normaliza espacios; no cambia formato (para no romper tus datos viejos).
-    return (phone or "").strip()
-
-
 @app.get("/admin/accounts", response_class=HTMLResponse)
 @app.get("/admin/accounts/", response_class=HTMLResponse)
 def admin_accounts(admin=Depends(require_admin), q: str = ""):
@@ -1235,10 +1229,7 @@ def admin_accounts(admin=Depends(require_admin), q: str = ""):
         if q:
             cur.execute(
                 """
-                SELECT id, phone, verified,
-                       COALESCE(is_blocked,0) AS is_blocked,
-                       COALESCE(username,'') AS username,
-                       created_at, updated_at
+                SELECT id, phone, verified, created_at, updated_at
                 FROM accounts
                 WHERE CAST(id AS TEXT) LIKE ? OR phone LIKE ?
                 ORDER BY id DESC
@@ -1249,10 +1240,7 @@ def admin_accounts(admin=Depends(require_admin), q: str = ""):
         else:
             cur.execute(
                 """
-                SELECT id, phone, verified,
-                       COALESCE(is_blocked,0) AS is_blocked,
-                       COALESCE(username,'') AS username,
-                       created_at, updated_at
+                SELECT id, phone, verified, created_at, updated_at
                 FROM accounts
                 ORDER BY id DESC
                 LIMIT 200
@@ -1266,17 +1254,16 @@ def admin_accounts(admin=Depends(require_admin), q: str = ""):
 
     trs = ""
     for r in rows:
+        uid = int(r["id"])
         verified = "✅ Verificado" if int(r["verified"] or 0) == 1 else "⏳ Sin verificar"
-        blocked = "🚫 Bloqueado" if int(r["is_blocked"] or 0) == 1 else "✅ Activo"
-        uname = (r["username"] or "").strip() or "-"
         trs += (
             "<tr>"
-            f"<td><code>{int(r['id'])}</code></td>"
-            f"<td>{html_escape(r['phone'] or '')}<div class='muted'>@{html_escape(uname)}</div></td>"
-            f"<td>{verified}<div class='muted'>{blocked}</div></td>"
+            f"<td><code>{uid}</code></td>"
+            f"<td>{html_escape(r['phone'] or '')}</td>"
+            f"<td>{verified}</td>"
             f"<td>{html_escape(r['created_at'] or '')}</td>"
             f"<td>{html_escape(r['updated_at'] or '')}</td>"
-            f"<td><a class='btn ghost' href='/admin/user/{int(r['id'])}'>Ver</a></td>"
+            f"<td><a class='btn ghost' href='/admin/user/{uid}'>Ver</a></td>"
             "</tr>"
         )
 
@@ -1316,18 +1303,24 @@ def admin_user_toggle_block(user_id: int, admin=Depends(require_admin)):
     def _do():
         conn = db_conn()
         cur = conn.cursor()
-        # OJO: la tabla accounts usa "id" (no user_id)
-        cur.execute("SELECT id, COALESCE(is_blocked,0) AS is_blocked FROM accounts WHERE id=?", (int(user_id),))
-        r = cur.fetchone()
-        if not r:
+
+        # Si la columna no existe, NO rompas (pero lo ideal es migrarla en schema)
+        try:
+            cur.execute("SELECT is_blocked FROM accounts WHERE id=?", (int(user_id),))
+            r = cur.fetchone()
+            if not r:
+                conn.close()
+                raise HTTPException(404, "Usuario no encontrado")
+            blocked = int(r["is_blocked"] or 0)
+            newv = 0 if blocked == 1 else 1
+            cur.execute("UPDATE accounts SET is_blocked=?, updated_at=? WHERE id=?", (newv, now_str(), int(user_id)))
+            conn.commit()
             conn.close()
-            raise HTTPException(404, "Usuario no encontrado")
-        blocked = int(r["is_blocked"] or 0)
-        newv = 0 if blocked == 1 else 1
-        cur.execute("UPDATE accounts SET is_blocked=?, updated_at=? WHERE id=?", (newv, now_str(), int(user_id)))
-        conn.commit()
-        conn.close()
-        return newv
+            return newv
+        except sqlite3.OperationalError:
+            conn.close()
+            # Columna no existe
+            raise HTTPException(500, "Falta columna accounts.is_blocked. Migra la DB en schema.")
 
     newv = _retry_sqlite(_do)
     admin_log("user_toggle_block", json.dumps({"user_id": user_id, "is_blocked": newv}, ensure_ascii=False))
@@ -1340,21 +1333,21 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
         conn = db_conn()
         cur = conn.cursor()
 
-        # OJO: accounts usa "id"
-        cur.execute(
-            """
-            SELECT id, phone, verified,
-                   COALESCE(username,'') AS username,
-                   COALESCE(is_blocked,0) AS is_blocked,
-                   COALESCE(last_seen,'') AS last_seen,
-                   created_at, updated_at
-            FROM accounts
-            WHERE id=?
-            """,
-            (int(user_id),),
-        )
+        # Usuario (tabla REAL)
+        cur.execute("SELECT id, phone, verified, created_at, updated_at FROM accounts WHERE id=?", (int(user_id),))
         u = cur.fetchone()
 
+        # blocked opcional
+        is_blocked = 0
+        try:
+            cur.execute("SELECT is_blocked FROM accounts WHERE id=?", (int(user_id),))
+            rr = cur.fetchone()
+            if rr:
+                is_blocked = int(rr["is_blocked"] or 0)
+        except Exception:
+            is_blocked = 0
+
+        # Proxies del bot (si existe)
         proxies_rows = []
         try:
             cur.execute("SELECT id, ip, vence, estado FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 50", (int(user_id),))
@@ -1362,6 +1355,7 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
         except Exception:
             proxies_rows = []
 
+        # Pedidos del bot (si existe)
         req_rows = []
         try:
             cur.execute(
@@ -1374,18 +1368,15 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
             req_rows = []
 
         conn.close()
-        return u, proxies_rows, req_rows
+        return u, is_blocked, proxies_rows, req_rows
 
-    u, proxies_rows, req_rows = _retry_sqlite(_do)
+    u, is_blocked, proxies_rows, req_rows = _retry_sqlite(_do)
 
     if not u:
         return nice_error_page("Usuario", "No encontré ese usuario.", "/admin/accounts", "⬅️ Volver")
 
-    uname = (u["username"] or "").strip() or "-"
-    phone = u["phone"] or "-"
+    tag = "🚫 BLOQUEADO" if is_blocked == 1 else "✅ ACTIVO"
     verified = "✅ Verificado" if int(u["verified"] or 0) == 1 else "⏳ Sin verificar"
-    blocked = int(u["is_blocked"] or 0)
-    tag = "🚫 BLOQUEADO" if blocked == 1 else "✅ ACTIVO"
 
     phtml = ""
     for r in proxies_rows:
@@ -1419,8 +1410,8 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
     if not ohtml:
         ohtml = "<tr><td colspan='8' class='muted'>No hay pedidos</td></tr>"
 
-    toggle_label = "🔓 Desbloquear" if blocked == 1 else "⛔ Bloquear"
-    toggle_class = "btn" if blocked == 1 else "btn bad"
+    toggle_label = "🔓 Desbloquear" if is_blocked == 1 else "⛔ Bloquear"
+    toggle_class = "btn" if is_blocked == 1 else "btn bad"
 
     body = f"""
     <div class="card">
@@ -1436,8 +1427,8 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
       <div class="hr"></div>
       <div class="muted">Usuario</div>
       <div class="kpi">{int(user_id)}</div>
-      <p class="muted">{html_escape(phone)} • @{html_escape(uname)} • {verified} • {tag}</p>
-      <p class="muted">Última actividad: {html_escape(u['last_seen'] or '-')}</p>
+      <p class="muted">{html_escape(u['phone'] or '')} • {verified} • {tag}</p>
+      <p class="muted">Creado: {html_escape(u['created_at'] or '')} • Actualizado: {html_escape(u['updated_at'] or '')}</p>
     </div>
 
     <div class="card">
@@ -1497,13 +1488,24 @@ def admin_orders(admin=Depends(require_admin), state: str = ""):
         rid = int(r["id"])
         uid = int(r["user_id"])
         tipo = (r["tipo"] or "").strip()
+
         extra = ""
         if tipo == "renew" and int(r["target_proxy_id"] or 0) > 0:
             extra = f" • Proxy #{int(r['target_proxy_id'])}"
 
+        delivery_box = ""
+        if tipo == "buy":
+            delivery_box = """
+            <div style="margin-top:8px;">
+              <div class="muted">📌 Pega aquí las proxies a entregar (1 por línea).</div>
+              <textarea name="delivery_raw" placeholder="ip:port:user:pass&#10;ip:port:user:pass" style="min-height:90px;"></textarea>
+            </div>
+            """
+
         approve_form = f"""
-          <form method="post" action="/admin/order/{rid}/approve" style="display:inline;">
-            <button class="btn" type="submit">✅ Aprobar</button>
+          <form method="post" action="/admin/order/{rid}/approve" style="display:inline; width:100%;">
+            {delivery_box}
+            <button class="btn" type="submit" style="margin-top:8px;">✅ Aprobar</button>
           </form>
         """
         reject_form = f"""
@@ -1523,7 +1525,7 @@ def admin_orders(admin=Depends(require_admin), state: str = ""):
             f"<td>{html_escape(r['estado'] or '')}</td>"
             f"<td>{html_escape(r['created_at'] or '')}</td>"
             f"<td>{voucher_cell}</td>"
-            f"<td>{approve_form}{reject_form}</td>"
+            f"<td style='min-width:260px;'>{approve_form}{reject_form}</td>"
             "</tr>"
         )
 
@@ -1560,6 +1562,27 @@ def _deliver_buy_only_count(qty: int) -> bool:
         return False
     set_setting("stock_available", str(stock - qty))
     return True
+
+def _deliver_buy_add_proxies(conn: sqlite3.Connection, user_id: int, raw_text: str, qty: int, dias: int):
+    lines = [ln.strip() for ln in (raw_text or "").splitlines() if ln.strip()]
+    if len(lines) < qty:
+        raise HTTPException(400, f"Pegaste {len(lines)} proxies pero el pedido es de {qty}.")
+
+    start = datetime.now()
+    vdt = start + timedelta(days=dias)
+
+    cur = conn.cursor()
+    for i in range(qty):
+        raw = lines[i]
+        # Sacar IP base
+        ip = raw
+        first = raw.splitlines()[0].strip()
+        ip = first.replace("http://", "").replace("https://", "").split()[0]
+
+        cur.execute(
+            "INSERT INTO proxies(user_id,ip,inicio,vence,estado,raw) VALUES(?,?,?,?,?,?)",
+            (int(user_id), ip, fmt_dt(start), fmt_dt(vdt), "active", raw),
+        )
 
 
 def _deliver_renew_extend(conn: sqlite3.Connection, user_id: int, proxy_id: int, dias: int):
@@ -1611,7 +1634,7 @@ def _deliver_claim_add_proxy(conn: sqlite3.Connection, user_id: int, note: str):
 
 
 @app.post("/admin/order/{rid}/approve")
-def admin_order_approve(rid: int, admin=Depends(require_admin)):
+def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(require_admin)):
     dias = int(float(get_setting("dias_proxy", str(DEFAULT_DIAS_PROXY)) or DEFAULT_DIAS_PROXY))
     if dias > 30:
         dias = 30
@@ -1634,17 +1657,25 @@ def admin_order_approve(rid: int, admin=Depends(require_admin)):
         target_proxy_id = int(req["target_proxy_id"] or 0)
         note = (req["note"] or "").strip()
 
-        # entregas dentro de la misma conexión (menos locks)
         if tipo == "buy":
             ok = _deliver_buy_only_count(qty)
             if not ok:
                 conn.close()
                 raise HTTPException(400, "Stock insuficiente para aprobar esta compra.")
+
+            # ✅ NUEVO: si pegas proxies, se agregan al sistema
+            if (delivery_raw or "").strip():
+                _deliver_buy_add_proxies(conn, uid, delivery_raw, qty, dias)
+            else:
+                # si no pegaste, se aprueba pero queda pendiente de entrega manual
+                pass
+
         elif tipo == "renew":
             if target_proxy_id <= 0:
                 conn.close()
                 raise HTTPException(400, "Renovación sin Proxy ID.")
             _deliver_renew_extend(conn, uid, target_proxy_id, dias)
+
         elif tipo == "claim":
             _deliver_claim_add_proxy(conn, uid, note)
 
@@ -1652,9 +1683,12 @@ def admin_order_approve(rid: int, admin=Depends(require_admin)):
         conn.commit()
         conn.close()
 
-        # notificaciones fuera de la transacción
+        # Notificaciones
         if tipo == "buy":
-            notify_user(uid, f"✅ Tu compra fue aprobada. Proxies: {qty}.")
+            if (delivery_raw or "").strip():
+                notify_user(uid, f"✅ Compra aprobada y entregada. Se agregaron {qty} proxies a tu cuenta.")
+            else:
+                notify_user(uid, f"✅ Compra aprobada. (Pendiente entrega de {qty} proxies por el admin).")
         elif tipo == "renew":
             notify_user(uid, f"✅ Renovación aprobada. Proxy #{target_proxy_id} extendida {dias} días.")
         elif tipo == "claim":
@@ -2997,3 +3031,4 @@ def api_outbox(admin=Depends(require_admin)):
 
     rows = _retry_sqlite(_do)
     return {"enabled": True, "items": rows}
+
