@@ -1533,15 +1533,15 @@ def admin_orders(admin=Depends(require_admin), state: str = ""):
         if tipo == "renew" and int(r["target_proxy_id"] or 0) > 0:
             extra = f" • Proxy #{int(r['target_proxy_id'])}"
 
-        deliver_box = ""
-if tipo == "buy":
-    deliver_box = f"""
-      <div style="margin-top:8px;">
-        <label class="muted">Pega aquí {qty} proxies (RAW) — 1 por línea</label>
-        <textarea name="delivery_raw" placeholder="ip:port:user:pass&#10;ip:port:user:pass"></textarea>
-      </div>
-    """
+                deliver_box = ""
+        if tipo == "buy":
+            deliver_box = f"""
+              <div style="margin-top:8px;">
+                <label class="muted">Pega aquí {qty} proxies (RAW) — 1 por línea</label>
+                <textarea name="delivery_raw" placeholder="ip:port:user:pass&#10;ip:port:user:pass"></textarea>
+              </div>
             """
+
 
         approve_form = f"""
           <form method="post" action="/admin/order/{rid}/approve" style="display:inline; min-width:320px;">
