@@ -17,7 +17,6 @@ import base64
 import hashlib
 import sqlite3
 import secrets
-from email.message import EmailMessage
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 
@@ -27,22 +26,25 @@ from fastapi.staticfiles import StaticFiles
 
 
 # ====== CONFIG EMAIL (PON TUS DATOS AQUÍ) ======
-SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 587
-SMTP_USER = "santiaogwarmi8@gmail.com"      # <-- tu gmail
-SMTP_PASS = "rzch lrcg tyfi sopc" # <-- la app password (NO tu password normal)
-SMTP_FROM_NAME = "Gproxy"
+import smtplib
+from email.message import EmailMessage
 
-def send_email(to_email: str, subject: str, body: str) -> None:
-    to_email = (to_email or "").strip()
-    if not to_email:
-        return
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "").strip()   # tu gmail
+SMTP_PASS = os.getenv("SMTP_PASS", "").strip()   # app password (NO tu clave normal)
+SMTP_FROM = os.getenv("SMTP_FROM", "").strip() or SMTP_USER
+
+
+def send_email(to_email: str, subject: str, body: str):
+    if not SMTP_USER or not SMTP_PASS:
+        return  # si no configuraste SMTP, no revientes el panel
 
     msg = EmailMessage()
-    msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_USER}>"
+    msg["From"] = SMTP_FROM
     msg["To"] = to_email
     msg["Subject"] = subject
-    msg.set_content(body or "")
+    msg.set_content(body)
 
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as s:
         s.ehlo()
@@ -1756,35 +1758,6 @@ def _deliver_claim_add_proxy(conn: sqlite3.Connection, user_id: int, note: str):
 
 
 @app.post("/admin/order/{rid}/approve")
-import smtplib
-from email.message import EmailMessage
-
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "").strip()   # tu gmail
-SMTP_PASS = os.getenv("SMTP_PASS", "").strip()   # app password (NO tu clave normal)
-SMTP_FROM = os.getenv("SMTP_FROM", "").strip() or SMTP_USER
-
-
-def send_email(to_email: str, subject: str, body: str):
-    if not SMTP_USER or not SMTP_PASS:
-        # si no configuraste SMTP, no revientes el panel
-        return
-
-    msg = EmailMessage()
-    msg["From"] = SMTP_FROM
-    msg["To"] = to_email
-    msg["Subject"] = subject
-    msg.set_content(body)
-
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as s:
-        s.ehlo()
-        s.starttls()
-        s.login(SMTP_USER, SMTP_PASS)
-        s.send_message(msg)
-
-
-@app.post("/admin/order/{rid}/approve")
 def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(require_admin)):
     dias = int(float(get_setting("dias_proxy", str(DEFAULT_DIAS_PROXY)) or DEFAULT_DIAS_PROXY))
     if dias > 30:
@@ -1796,10 +1769,10 @@ def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(re
         conn = db_conn()
         cur = conn.cursor()
 
-        # ✅ TRAEMOS email también
         cur.execute(
-    "SELECT id, user_id, tipo, cantidad, target_proxy_id, note, email FROM requests WHERE id=?",
-    (int(rid),),
+            "SELECT id, user_id, tipo, cantidad, target_proxy_id, note, email "
+            "FROM requests WHERE id=?",
+            (int(rid),),
         )
         req = cur.fetchone()
         if not req:
@@ -1824,7 +1797,6 @@ def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(re
             if (delivery_raw or "").strip():
                 _deliver_buy_add_proxies(conn, uid, delivery_raw, qty, dias)
                 delivered = True
-            # si no pegaste proxies, aprobamos igual (pendiente entrega)
 
         elif tipo == "renew":
             if target_proxy_id <= 0:
@@ -1854,11 +1826,9 @@ def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(re
 
         admin_log("order_approve", json.dumps({"rid": rid, "tipo": tipo, "uid": uid}, ensure_ascii=False))
 
-        # ✅ devolvemos datos para enviar email fuera de la transacción
         return {
             "rid": int(rid),
             "tipo": tipo,
-            "uid": uid,
             "qty": qty,
             "dias": dias,
             "target_proxy_id": target_proxy_id,
@@ -1869,50 +1839,29 @@ def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(re
 
     info = _retry_sqlite(_do)
 
-    # ✅ Email al cliente (solo si dejó Gmail)
+    # Email al cliente (solo si dejó Gmail)
     try:
         if info["email"]:
             if info["tipo"] == "buy" and info["delivered"]:
                 subject = f"✅ Proxies entregadas (Pedido #{info['rid']})"
                 body = (
-                    f"Hola!\n\n"
-                    f"Tu compra fue aprobada y tus proxies fueron entregadas.\n\n"
+                    "Hola!\n\n"
+                    "Tu compra fue aprobada y tus proxies fueron entregadas.\n\n"
                     f"Pedido: #{info['rid']}\n"
                     f"Cantidad: {info['qty']}\n\n"
                     f"PROXIES:\n{info['delivery_raw']}\n\n"
                     f"Gracias,\n{APP_TITLE}\n"
                 )
                 send_email(info["email"], subject, body)
-email = (req["email"] or "").strip()
-
-if (delivery_raw or "").strip():
-    _deliver_buy_add_proxies(conn, uid, delivery_raw, qty, dias)
-
-    # Email al cliente
-    if email:
-        subject = f"✅ Proxies entregadas (Pedido #{rid})"
-        body = (
-            f"Hola!\n\n"
-            f"Tu compra fue aprobada y tus proxies fueron entregadas.\n\n"
-            f"Pedido: #{rid}\n"
-            f"Cantidad: {qty}\n\n"
-            f"PROXIES:\n{delivery_raw.strip()}\n\n"
-            f"Gracias,\n{APP_TITLE}\n"
-        )
-        try:
-            send_email(email, subject, body)
-        except Exception:
-            pass
-
 
             elif info["tipo"] == "buy" and not info["delivered"]:
                 subject = f"✅ Compra aprobada (Pedido #{info['rid']})"
                 body = (
-                    f"Hola!\n\n"
-                    f"Tu compra fue aprobada.\n"
+                    "Hola!\n\n"
+                    "Tu compra fue aprobada.\n\n"
                     f"Pedido: #{info['rid']}\n"
                     f"Cantidad: {info['qty']}\n\n"
-                    f"Nota: el admin aún no ha pegado/entregado las proxies. Te avisaremos cuando estén.\n\n"
+                    "Nota: el admin aún no ha entregado las proxies. Te avisaremos cuando estén.\n\n"
                     f"Gracias,\n{APP_TITLE}\n"
                 )
                 send_email(info["email"], subject, body)
@@ -1920,8 +1869,8 @@ if (delivery_raw or "").strip():
             elif info["tipo"] == "renew":
                 subject = f"✅ Renovación aprobada (Pedido #{info['rid']})"
                 body = (
-                    f"Hola!\n\n"
-                    f"Tu renovación fue aprobada.\n\n"
+                    "Hola!\n\n"
+                    "Tu renovación fue aprobada.\n\n"
                     f"Pedido: #{info['rid']}\n"
                     f"Proxy ID: #{info['target_proxy_id']}\n"
                     f"Días extendidos: {info['dias']}\n\n"
@@ -1932,8 +1881,8 @@ if (delivery_raw or "").strip():
             elif info["tipo"] == "claim":
                 subject = f"✅ Proxy verificada y agregada (Pedido #{info['rid']})"
                 body = (
-                    f"Hola!\n\n"
-                    f"Tu proxy existente fue verificada y agregada a tu cuenta.\n\n"
+                    "Hola!\n\n"
+                    "Tu proxy existente fue verificada y agregada a tu cuenta.\n\n"
                     f"Pedido: #{info['rid']}\n\n"
                     f"Gracias,\n{APP_TITLE}\n"
                 )
