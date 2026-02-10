@@ -1736,6 +1736,35 @@ def _deliver_claim_add_proxy(conn: sqlite3.Connection, user_id: int, note: str):
 
 
 @app.post("/admin/order/{rid}/approve")
+import smtplib
+from email.message import EmailMessage
+
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "").strip()   # tu gmail
+SMTP_PASS = os.getenv("SMTP_PASS", "").strip()   # app password (NO tu clave normal)
+SMTP_FROM = os.getenv("SMTP_FROM", "").strip() or SMTP_USER
+
+
+def send_email(to_email: str, subject: str, body: str):
+    if not SMTP_USER or not SMTP_PASS:
+        # si no configuraste SMTP, no revientes el panel
+        return
+
+    msg = EmailMessage()
+    msg["From"] = SMTP_FROM
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.set_content(body)
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as s:
+        s.ehlo()
+        s.starttls()
+        s.login(SMTP_USER, SMTP_PASS)
+        s.send_message(msg)
+
+
+@app.post("/admin/order/{rid}/approve")
 def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(require_admin)):
     dias = int(float(get_setting("dias_proxy", str(DEFAULT_DIAS_PROXY)) or DEFAULT_DIAS_PROXY))
     if dias > 30:
@@ -1747,8 +1776,9 @@ def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(re
         conn = db_conn()
         cur = conn.cursor()
 
+        # ✅ TRAEMOS email también
         cur.execute(
-            "SELECT id, user_id, tipo, cantidad, target_proxy_id, note FROM requests WHERE id=?",
+            "SELECT id, user_id, tipo, cantidad, target_proxy_id, note, email FROM requests WHERE id=?",
             (int(rid),),
         )
         req = cur.fetchone()
@@ -1761,6 +1791,9 @@ def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(re
         qty = max(1, int(req["cantidad"] or 1))
         target_proxy_id = int(req["target_proxy_id"] or 0)
         note = (req["note"] or "").strip()
+        email = (req["email"] or "").strip()
+
+        delivered = False
 
         if tipo == "buy":
             ok = _deliver_buy_only_count(qty)
@@ -1770,7 +1803,8 @@ def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(re
 
             if (delivery_raw or "").strip():
                 _deliver_buy_add_proxies(conn, uid, delivery_raw, qty, dias)
-            # si no pegaste proxies, igual aprobamos el pedido (queda pendiente entrega manual)
+                delivered = True
+            # si no pegaste proxies, aprobamos igual (pendiente entrega)
 
         elif tipo == "renew":
             if target_proxy_id <= 0:
@@ -1787,7 +1821,7 @@ def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(re
 
         # Notificaciones internas (panel)
         if tipo == "buy":
-            if (delivery_raw or "").strip():
+            if delivered:
                 notify_user(uid, f"✅ Compra aprobada y entregada. Se agregaron {qty} proxies a tu cuenta.")
             else:
                 notify_user(uid, f"✅ Compra aprobada. (Pendiente entrega de {qty} proxies por el admin).")
@@ -1800,47 +1834,72 @@ def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(re
 
         admin_log("order_approve", json.dumps({"rid": rid, "tipo": tipo, "uid": uid}, ensure_ascii=False))
 
-    _retry_sqlite(_do)
-    return RedirectResponse(url="/admin/orders", status_code=302)
+        # ✅ devolvemos datos para enviar email fuera de la transacción
+        return {
+            "rid": int(rid),
+            "tipo": tipo,
+            "uid": uid,
+            "qty": qty,
+            "dias": dias,
+            "target_proxy_id": target_proxy_id,
+            "email": email,
+            "delivered": delivered,
+            "delivery_raw": (delivery_raw or "").strip(),
+        }
 
+    info = _retry_sqlite(_do)
 
-# ✅ Email al cliente si dejó Gmail
-if email:
-    subject = f"Proxies entregadas (Pedido #{rid})"
-    body = (
-        f"Hola!\n\n"
-        f"Tu compra fue aprobada y tus proxies fueron entregadas.\n\n"
-        f"Pedido: #{rid}\n"
-        f"Cantidad: {qty}\n\n"
-        f"PROXIES:\n{delivery_raw.strip()}\n\n"
-        f"Gracias,\n{APP_TITLE}\n"
-    )
+    # ✅ Email al cliente (solo si dejó Gmail)
     try:
-        send_email(email, subject, body)
+        if info["email"]:
+            if info["tipo"] == "buy" and info["delivered"]:
+                subject = f"✅ Proxies entregadas (Pedido #{info['rid']})"
+                body = (
+                    f"Hola!\n\n"
+                    f"Tu compra fue aprobada y tus proxies fueron entregadas.\n\n"
+                    f"Pedido: #{info['rid']}\n"
+                    f"Cantidad: {info['qty']}\n\n"
+                    f"PROXIES:\n{info['delivery_raw']}\n\n"
+                    f"Gracias,\n{APP_TITLE}\n"
+                )
+                send_email(info["email"], subject, body)
+
+            elif info["tipo"] == "buy" and not info["delivered"]:
+                subject = f"✅ Compra aprobada (Pedido #{info['rid']})"
+                body = (
+                    f"Hola!\n\n"
+                    f"Tu compra fue aprobada.\n"
+                    f"Pedido: #{info['rid']}\n"
+                    f"Cantidad: {info['qty']}\n\n"
+                    f"Nota: el admin aún no ha pegado/entregado las proxies. Te avisaremos cuando estén.\n\n"
+                    f"Gracias,\n{APP_TITLE}\n"
+                )
+                send_email(info["email"], subject, body)
+
+            elif info["tipo"] == "renew":
+                subject = f"✅ Renovación aprobada (Pedido #{info['rid']})"
+                body = (
+                    f"Hola!\n\n"
+                    f"Tu renovación fue aprobada.\n\n"
+                    f"Pedido: #{info['rid']}\n"
+                    f"Proxy ID: #{info['target_proxy_id']}\n"
+                    f"Días extendidos: {info['dias']}\n\n"
+                    f"Gracias,\n{APP_TITLE}\n"
+                )
+                send_email(info["email"], subject, body)
+
+            elif info["tipo"] == "claim":
+                subject = f"✅ Proxy verificada y agregada (Pedido #{info['rid']})"
+                body = (
+                    f"Hola!\n\n"
+                    f"Tu proxy existente fue verificada y agregada a tu cuenta.\n\n"
+                    f"Pedido: #{info['rid']}\n\n"
+                    f"Gracias,\n{APP_TITLE}\n"
+                )
+                send_email(info["email"], subject, body)
     except Exception:
         pass
 
-
-@app.post("/admin/order/{rid}/reject")
-def admin_order_reject(rid: int, admin=Depends(require_admin)):
-    def _do():
-        conn = db_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT id, user_id FROM requests WHERE id=?", (int(rid),))
-        req = cur.fetchone()
-        if not req:
-            conn.close()
-            raise HTTPException(404, "Pedido no encontrado")
-
-        uid = int(req["user_id"])
-        cur.execute("UPDATE requests SET estado=? WHERE id=?", ("rejected", int(rid)))
-        conn.commit()
-        conn.close()
-
-        notify_user(uid, f"❌ Tu pedido #{rid} fue rechazado. Si necesitas ayuda, abre un ticket en soporte.")
-        admin_log("order_reject", json.dumps({"rid": rid, "uid": uid}, ensure_ascii=False))
-
-    _retry_sqlite(_do)
     return RedirectResponse(url="/admin/orders", status_code=302)
 
 
