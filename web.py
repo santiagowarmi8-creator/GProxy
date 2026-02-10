@@ -1549,7 +1549,6 @@ def admin_orders(admin=Depends(require_admin), state: str = ""):
     rows = _retry_sqlite(_do)
 
     trs = ""
-        trs = ""
     for r in rows:
         voucher = (r["voucher_path"] or "").strip()
         voucher_cell = f"<a href='/static/{html_escape(voucher)}' target='_blank'>ver</a>" if voucher else "-"
