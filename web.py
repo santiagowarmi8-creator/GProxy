@@ -115,6 +115,8 @@ CLIENT_SECRET: Optional[str] = None
 def now_str() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
+def day_floor(dt: datetime) -> datetime:
+    return datetime(dt.year, dt.month, dt.day)
 
 def parse_dt(s: str) -> Optional[datetime]:
     try:
@@ -235,28 +237,6 @@ def admin_log(action: str, details: str = ""):
         conn.close()
 
     _retry_sqlite(_do)
-
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "").strip()   # tu gmail
-SMTP_PASS = os.getenv("SMTP_PASS", "").strip()   # contraseña de app (no la normal)
-FROM_EMAIL = os.getenv("FROM_EMAIL", "").strip() or SMTP_USER
-
-def send_email(to_email: str, subject: str, body: str):
-    if not (SMTP_USER and SMTP_PASS and to_email):
-        return
-
-    msg = EmailMessage()
-    msg["From"] = FROM_EMAIL
-    msg["To"] = to_email
-    msg["Subject"] = subject
-    msg.set_content(body)
-
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
-        s.starttls()
-        s.login(SMTP_USER, SMTP_PASS)
-        s.send_message(msg)
-
 
 def notify_user(user_id: int, message: str):
     def _do():
@@ -401,6 +381,11 @@ def try_client(request: Request) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
+    # accounts email column
+    try:
+        _ensure_column(conn, "accounts", "email", "TEXT NOT NULL DEFAULT ''")
+    except Exception:
+        pass
 
 # =========================
 # Password hashing
@@ -521,10 +506,6 @@ def ensure_schema() -> str:
             _ensure_column(conn, "accounts", col, coldef)
         except Exception:
             pass
-try:
-    _ensure_column(conn, "accounts", "email", "TEXT NOT NULL DEFAULT ''")
-except Exception:
-    pass
 
     # signup_pins
     _ensure_table(
@@ -827,13 +808,13 @@ textarea { max-width:100%; }
   <div class="noise"></div>
   <div class="wrap">
     <div class="topbar">
-      <div class="brand">
-        <div class="logo"><span>G</span></div>
-        <div>
-          <p class="title">{t}</p>
-          <p class="subtitle">{st}</p>
-        </div>
-      </div>
+      <a href="/" class="brand" style="text-decoration:none; color:inherit;">
+  <div class="logo"><span>G</span></div>
+  <div>
+    <p class="title">GProxy</p>
+    <p class="subtitle">{st}</p>
+  </div>
+</a>
       <div class="chip">🛡️ Proxies USA • Privadas • Estables</div>
     </div>
 
@@ -1434,6 +1415,7 @@ def admin_user_toggle_block(user_id: int, admin=Depends(require_admin)):
     admin_log("user_toggle_block", json.dumps({"user_id": user_id, "is_blocked": newv}, ensure_ascii=False))
     return RedirectResponse(url=f"/admin/user/{int(user_id)}", status_code=302)
 
+<p class="muted">{html_escape(u['phone'] or '')} • {html_escape(u['email'] or '')} • {tag}</p>
 
 @app.get("/admin/user/{user_id}", response_class=HTMLResponse)
 def admin_user_detail(user_id: int, admin=Depends(require_admin)):
@@ -1443,6 +1425,8 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
 
         cur.execute(
             """
+	    SELECT id, phone, email, verified, ...
+
             SELECT id, phone, verified,
                    COALESCE(is_blocked,0) AS is_blocked,
                    COALESCE(last_seen,'') AS last_seen,
@@ -1495,6 +1479,21 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
         )
     if not phtml:
         phtml = "<tr><td colspan='4' class='muted'>Sin proxies</td></tr>"
+<tr><th>PID</th><th>IP</th><th>Vence</th><th>Estado</th><th>Acciones</th></tr>
+phtml += (
+    "<tr>"
+    f"<td>{int(r['id'])}</td>"
+    f"<td>{html_escape(r['ip'] or '')}</td>"
+    f"<td>{html_escape(r['vence'] or '')}</td>"
+    f"<td>{html_escape(r['estado'] or '')}</td>"
+    f"<td>"
+    f"  <form method='post' action='/admin/proxy/{int(r['id'])}/delete' "
+    f"        onsubmit=\"return confirm('Eliminar proxy #{int(r['id'])}?')\">"
+    f"    <button class='btn bad' type='submit'>🗑 Eliminar</button>"
+    f"  </form>"
+    f"</td>"
+    "</tr>"
+)
 
     ohtml = ""
     for r in req_rows:
@@ -1605,15 +1604,15 @@ def admin_orders(admin=Depends(require_admin), state: str = ""):
             extra = f" • Proxy #{int(r['target_proxy_id'])}"
 
         # ✅ ESTA PARTE ES LA QUE TE ESTABA ROMPIENDO
-        deliver_box = ""
-        if tipo == "buy":
-            deliver_box = f"""
-              <div style="margin-top:8px;">
-                <label class="muted">Pega aquí {qty} proxies (RAW) — 1 por línea</label>
-                <textarea name="delivery_raw" placeholder="ip:port:user:pass&#10;ip:port:user:pass"></textarea>
-              </div>
-            """
-<textarea style="width:100%; max-width:520px;" ...></textarea>
+        deliver_box = f"""
+  <div style="margin-top:8px; max-width:520px;">
+    <label class="muted">Pega aquí {qty} proxies (RAW) — 1 por línea</label>
+    <textarea
+      name="delivery_raw"
+      style="width:100%; max-width:520px;"
+      placeholder="ip:port:user:pass&#10;ip:port:user:pass"></textarea>
+  </div>
+"""
 
         approve_form = f"""
           <form method="post" action="/admin/order/{rid}/approve" style="display:inline; min-width:320px;">
@@ -1677,16 +1676,6 @@ def _deliver_buy_only_count(qty: int) -> bool:
     return True
 
 def _deliver_buy_add_proxies(conn: sqlite3.Connection, user_id: int, raw_text: str, qty: int, dias: int):
-    # Soporta:
-    # - 1 proxy por línea: ip:port:user:pass
-    # - Bloques tipo:
-    #     HTTP
-    #     ip:port:user:pass
-    #     HTTP
-    #     ip:port:user:pass
-start = day_floor(datetime.now())
-vdt = start + timedelta(days=dias)
-
     lines = [ln.strip() for ln in (raw_text or "").splitlines()]
     items = []
     i = 0
@@ -1699,7 +1688,6 @@ vdt = start + timedelta(days=dias)
 
         up = ln.upper()
         if up in ("HTTP", "HTTPS", "SOCKS5", "SOCKS4"):
-            # el proxy real debe estar en la siguiente línea
             j = i + 1
             while j < len(lines) and not lines[j].strip():
                 j += 1
@@ -1710,19 +1698,18 @@ vdt = start + timedelta(days=dias)
             i = j + 1
             continue
 
-        # normal: una sola línea ya es proxy
         items.append(ln)
         i += 1
 
     if len(items) < qty:
         raise HTTPException(400, f"Pegaste {len(items)} proxies pero el pedido es de {qty}.")
 
-    start = datetime.now()
-vdt = start + timedelta(days=dias)
+    start = day_floor(datetime.now())         # 00:00:00 hoy
+    vdt = start + timedelta(days=dias)        # 00:00:00 + dias
     cur = conn.cursor()
 
     for raw in items[:qty]:
-        first = raw.splitlines()[-1].strip()  # si es HTTP\nxxx, tomamos xxx
+        first = raw.splitlines()[-1].strip()
         ip = first.replace("http://", "").replace("https://", "").split()[0]
 
         cur.execute(
@@ -1738,8 +1725,10 @@ def _deliver_renew_extend(conn: sqlite3.Connection, user_id: int, proxy_id: int,
     p = cur.fetchone()
     if not p:
         raise HTTPException(400, "No encontré ese proxy para renovar.")
-    v_old = parse_dt(p["vence"] or "") or datetime.now()
-    base = v_old if v_old > datetime.now() else datetime.now()
+        now = datetime.now()
+    v_old = parse_dt(p["vence"] or "") or now
+    base_dt = v_old if v_old > now else now
+    base = day_floor(base_dt)
     v_new = base + timedelta(days=dias)
     cur.execute("UPDATE proxies SET vence=? WHERE id=?", (fmt_dt(v_new), int(proxy_id)))
 
@@ -1761,7 +1750,7 @@ def _deliver_claim_add_proxy(conn: sqlite3.Connection, user_id: int, note: str):
         first = raw.splitlines()[0].strip() if raw else ""
         ip = first.replace("http://", "").replace("https://", "").split()[0]
 
-    start = datetime.now()
+        start = day_floor(datetime.now())
     dias = int(float(get_setting("dias_proxy", "30") or 30))
     if dias <= 0:
         dias = 30
@@ -1771,7 +1760,7 @@ def _deliver_claim_add_proxy(conn: sqlite3.Connection, user_id: int, note: str):
     if vence:
         vdt = parse_dt(vence) or (start + timedelta(days=dias))
     else:
-        vdt = start + timedelta(days=dias)
+        vdt =     start = day_floor(datetime.now())
 
     cur = conn.cursor()
     cur.execute(
@@ -2013,17 +2002,15 @@ def client_signup_page():
 
 
 @app.post("/client/signup", response_class=HTMLResponse)
-def client_signup(phone: str = Form(...), password: str = Form(...), recovery_pin: str = Form(...)):
+def client_signup(
+    phone: str = Form(...),
+    password: str = Form(...),
+    recovery_pin: str = Form(...),
+    email: str = Form(""),
+):
     phone = _normalize_phone(phone)
     password = (password or "").strip()
     recovery_pin = (recovery_pin or "").strip()
-
-email = (email or "").strip()
-
-cur.execute(
- "INSERT INTO accounts(phone,password_hash,recovery_pin_hash,verified,email,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
- (phone, pwd_hash, rec_hash, 0, email, now_str(), now_str())
-)
 
     if not phone or len(phone) < 8:
         return nice_error_page("Datos inválidos", "Teléfono inválido.", "/client/signup", "↩️ Volver")
@@ -2144,26 +2131,36 @@ def client_verify(phone: str = Form(...), pin: str = Form(...)):
     if status == "bad":
         return nice_error_page("PIN incorrecto", f"PIN incorrecto. Intentos: {extra}/3", "/client/signup", "↩️ Volver")
 
+        # status == "ok"
+    def _get_uid_email():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT id, COALESCE(email,'') AS email FROM accounts WHERE phone=?", (phone,))
+        r = cur.fetchone()
+        conn.close()
+        if not r:
+            return 0, ""
+        return int(r["id"]), (r["email"] or "").strip()
+
+    uid, uemail = _retry_sqlite(_get_uid_email)
+
+    if uid:
+        notify_user(uid, f"🎉 Bienvenido a {APP_TITLE}. Tu cuenta ya está verificada.")
+        # email opcional
+        if uemail:
+            try:
+                send_email(
+                    uemail,
+                    f"🎉 Bienvenido a {APP_TITLE}",
+                    f"Hola!\n\nTu cuenta fue verificada con éxito.\n\n"
+                    f"Ya puedes comprar y gestionar tus proxies desde tu panel.\n\n"
+                    f"Gracias,\n{APP_TITLE}\n"
+                )
+            except Exception:
+                pass
+
     return nice_error_page("Cuenta verificada", "Ya puedes iniciar sesión.", "/client/login", "🔐 Iniciar sesión")
 
-# después de status ok
-def _get_email():
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT id, email FROM accounts WHERE phone=?", (phone,))
-    r = cur.fetchone()
-    conn.close()
-    return (int(r["id"]), (r["email"] or "").strip()) if r else (0, "")
-
-uid, email = _retry_sqlite(_get_email)
-if uid:
-    notify_user(uid, f"🎉 Bienvenido a {APP_TITLE}. Tu cuenta ya está verificada.")
-    if email:
-        send_email(
-            email,
-            f"🎉 Bienvenido a {APP_TITLE}",
-            f"Hola!\n\nTu cuenta fue verificada con éxito.\n\nYa puedes comprar y gestionar tus proxies desde tu panel.\n\nGracias,\n{APP_TITLE}\n"
-        )
 
 @app.get("/client/login", response_class=HTMLResponse)
 def client_login_page():
@@ -2191,6 +2188,32 @@ def client_login_page():
       </div>
     </div>
     """
+    # si falla, revisa si existe pero no verificada
+    def _check_unverified():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT verified FROM accounts WHERE phone=?", (_normalize_phone(phone),))
+        r = cur.fetchone()
+        conn.close()
+        return (int(r["verified"] or 0) == 0) if r else False
+
+    if not uid and _retry_sqlite(_check_unverified):
+        body = f"""
+        <div class="card">
+          <div class="kpi">Cuenta no verificada</div>
+          <p class="muted">Tu cuenta existe pero falta confirmar el PIN.</p>
+          <div class="hr"></div>
+
+          <form method="post" action="/client/resend_pin">
+            <input type="hidden" name="phone" value="{html_escape(_normalize_phone(phone))}"/>
+            <button class="btn" type="submit">📩 Reenviar PIN</button>
+            <a class="btn ghost" href="/client/signup" style="margin-left:10px;">✨ Crear de nuevo</a>
+          </form>
+        </div>
+        """
+        return HTMLResponse(page("Verificación", body, subtitle="Completa el PIN"))
+
+
     return page("Cliente • Login", body, subtitle="Acceso seguro")
 
 
@@ -2255,6 +2278,56 @@ def client_login(phone: str = Form(...), password: str = Form(...)):
         samesite=COOKIE_SAMESITE,
     )
     return resp
+
+@app.post("/client/resend_pin", response_class=HTMLResponse)
+def client_resend_pin(phone: str = Form(...)):
+    phone = _normalize_phone(phone)
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT id, verified FROM accounts WHERE phone=?", (phone,))
+        acc = cur.fetchone()
+        if not acc:
+            conn.close()
+            return ("no_account", "", "")
+        if int(acc["verified"] or 0) == 1:
+            conn.close()
+            return ("already", "", "")
+
+        pin = _pin_gen(6)
+        exp = _time_plus_minutes(5)
+        cur.execute(
+            "INSERT INTO signup_pins(phone,pin_hash,expires_at,attempts,estado,created_at) VALUES(?,?,?,?,?,?)",
+            (phone, pin_hash(pin, PIN_SECRET), exp, 0, "pending", now_str()),
+        )
+        conn.commit()
+        conn.close()
+        return ("ok", pin, exp)
+
+    st, pin, exp = _retry_sqlite(_do)
+    if st == "no_account":
+        return nice_error_page("No existe", "Ese teléfono no está registrado.", "/client/signup", "✨ Crear cuenta")
+    if st == "already":
+        return nice_error_page("Ya verificada", "Esa cuenta ya está verificada. Inicia sesión.", "/client/login", "🔐 Login")
+
+    body = f"""
+    <div class="card pinbox">
+      <div class="muted">Nuevo PIN de verificación</div>
+      <div class="kpi" style="letter-spacing:6px;">{html_escape(pin)}</div>
+      <p class="muted">Expira: <b>{html_escape(exp)}</b></p>
+    </div>
+    <div class="card">
+      <form method="post" action="/client/verify">
+        <input type="hidden" name="phone" value="{html_escape(phone)}"/>
+        <label class="muted">PIN</label>
+        <input name="pin" placeholder="123456"/>
+        <div style="height:12px;"></div>
+        <button class="btn" type="submit">Verificar</button>
+      </form>
+    </div>
+    """
+    return page("Verificación", body, subtitle="Reenviar PIN")
 
 @app.get("/logout")
 def client_logout():
@@ -2400,14 +2473,6 @@ def client_me(client=Depends(require_client)):
             if vence
             else "<span class='badge'>-</span>"
         )
-
-<th>Acciones</th>
-
-f"<td>
-  <form method='post' action='/admin/proxy/{int(r['id'])}/delete' onsubmit=\"return confirm('Eliminar proxy?')\">
-    <button class='btn bad' type='submit'>🗑 Eliminar</button>
-  </form>
-</td>"
 
         phtml += f"""
         <div class="card">
@@ -2665,7 +2730,9 @@ def client_buy_page(client=Depends(require_client)):
     p1 = int(float(get_setting("precio_primera", "1500") or 1500))
     currency = get_setting("currency", "DOP")
     bank = get_setting("bank_details", "")
-
+<p class="muted">
+  Promo: 5 proxies = <b>800</b> c/u • 10+ proxies = <b>700</b> c/u
+</p>
     body = f"""
     <div class="card">
       <div class="row">
@@ -2716,24 +2783,25 @@ def client_buy_submit(cantidad: str = Form("1"), email: str = Form(""), client=D
     except Exception:
         qty = 1
 
-    p1 = int(float(get_setting("precio_primera", "1500") or 1500))
+       p1 = int(float(get_setting("precio_primera", "1500") or 1500))
+    currency = get_setting("currency", "DOP")
 
-if qty >= 10:
-    unit = 700
-elif qty >= 5:
-    unit = 800
-else:
-    unit = p1
+    if qty >= 10:
+        unit = 700
+    elif qty >= 5:
+        unit = 800
+    else:
+        unit = p1
 
-monto = unit * qty
+    monto = int(unit * qty)
 
     def _do():
         conn = db_conn()
         cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO requests(user_id,tipo,ip,cantidad,monto,estado,created_at,email,currency,target_proxy_id,note) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (uid, "buy", "-", qty, monto, "awaiting_voucher", now_str(), email, currency, 0, ""),
+                cur.execute(
+            "INSERT INTO accounts(phone,password_hash,recovery_pin_hash,verified,email,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (phone, pwd_hash, rec_hash, 0, email, now_str(), now_str()),
         )
         conn.commit()
         rid = cur.lastrowid
