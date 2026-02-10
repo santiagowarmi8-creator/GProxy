@@ -18,16 +18,14 @@ import hashlib
 import sqlite3
 import secrets
 import smtplib
+from email.message import EmailMessage
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 
 from fastapi import FastAPI, Depends, HTTPException, Request, Form, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from email.message import EmailMessage
 
-import smtplib
-from email.message import EmailMessage
 
 # ====== CONFIG EMAIL (PON TUS DATOS AQUÍ) ======
 SMTP_HOST = "smtp.gmail.com"
@@ -232,6 +230,27 @@ def admin_log(action: str, details: str = ""):
         conn.close()
 
     _retry_sqlite(_do)
+
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "").strip()   # tu gmail
+SMTP_PASS = os.getenv("SMTP_PASS", "").strip()   # contraseña de app (no la normal)
+FROM_EMAIL = os.getenv("FROM_EMAIL", "").strip() or SMTP_USER
+
+def send_email(to_email: str, subject: str, body: str):
+    if not (SMTP_USER and SMTP_PASS and to_email):
+        return
+
+    msg = EmailMessage()
+    msg["From"] = FROM_EMAIL
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.set_content(body)
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
+        s.starttls()
+        s.login(SMTP_USER, SMTP_PASS)
+        s.send_message(msg)
 
 
 def notify_user(user_id: int, message: str):
@@ -1780,8 +1799,8 @@ def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(re
 
         # ✅ TRAEMOS email también
         cur.execute(
-            "SELECT id, user_id, tipo, cantidad, target_proxy_id, note, email FROM requests WHERE id=?",
-            (int(rid),),
+    "SELECT id, user_id, tipo, cantidad, target_proxy_id, note, email FROM requests WHERE id=?",
+    (int(rid),),
         )
         req = cur.fetchone()
         if not req:
@@ -1865,6 +1884,27 @@ def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(re
                     f"Gracias,\n{APP_TITLE}\n"
                 )
                 send_email(info["email"], subject, body)
+email = (req["email"] or "").strip()
+
+if (delivery_raw or "").strip():
+    _deliver_buy_add_proxies(conn, uid, delivery_raw, qty, dias)
+
+    # Email al cliente
+    if email:
+        subject = f"✅ Proxies entregadas (Pedido #{rid})"
+        body = (
+            f"Hola!\n\n"
+            f"Tu compra fue aprobada y tus proxies fueron entregadas.\n\n"
+            f"Pedido: #{rid}\n"
+            f"Cantidad: {qty}\n\n"
+            f"PROXIES:\n{delivery_raw.strip()}\n\n"
+            f"Gracias,\n{APP_TITLE}\n"
+        )
+        try:
+            send_email(email, subject, body)
+        except Exception:
+            pass
+
 
             elif info["tipo"] == "buy" and not info["delivered"]:
                 subject = f"✅ Compra aprobada (Pedido #{info['rid']})"
@@ -3229,7 +3269,6 @@ def api_outbox(admin=Depends(require_admin)):
 
     rows = _retry_sqlite(_do)
     return {"enabled": True, "items": rows}
-
 
 
 
