@@ -2138,19 +2138,29 @@ def client_login(phone: str = Form(...), password: str = Form(...)):
             "↩️ Intentar de nuevo",
         )
 
-def _touch():
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE accounts SET last_seen=?, updated_at=? WHERE id=?", (now_str(), now_str(), int(uid)))
-    conn.commit()
-    conn.close()
-_retry_sqlite(_touch)
+    # ✅ actualizar last_seen / updated_at
+    def _touch():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE accounts SET last_seen=?, updated_at=? WHERE id=?",
+            (now_str(), now_str(), int(uid)),
+        )
+        conn.commit()
+        conn.close()
+
+    _retry_sqlite(_touch)
 
     session = sign({"role": "client", "uid": int(uid)}, CLIENT_SECRET, exp_seconds=7 * 24 * 3600)
     resp = RedirectResponse(url="/me", status_code=302)
-    resp.set_cookie("client_session", session, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE)
+    resp.set_cookie(
+        "client_session",
+        session,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+    )
     return resp
-
 
 @app.get("/logout")
 def client_logout():
@@ -3050,5 +3060,6 @@ def api_outbox(admin=Depends(require_admin)):
 
     rows = _retry_sqlite(_do)
     return {"enabled": True, "items": rows}
+
 
 
