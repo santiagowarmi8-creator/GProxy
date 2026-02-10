@@ -926,27 +926,33 @@ def debug_email(admin=Depends(require_admin)):
 # =========================
 # ADMIN AUTH
 # =========================
-@app.get("/admin/login", response_class=HTMLResponse)
-def admin_login_page():
+@app.get("/client/login", response_class=HTMLResponse)
+def client_login_page():
     body = """
     <div class="grid">
       <div class="card">
-        <div class="kpi">Admin Access</div>
-        <p class="muted">Control total: usuarios, pedidos, soporte, ajustes y limpieza.</p>
+        <div class="kpi">Panel Cliente</div>
+        <p class="muted">Entra con tu Teléfono + Contraseña.</p>
       </div>
       <div class="card">
-        <form method="post" action="/admin/login">
-          <label class="muted">Clave Admin</label>
-          <input type="password" name="password" placeholder="Tu clave admin"/>
+        <form method="post" action="/client/login">
+          <label class="muted">Teléfono</label>
+          <input name="phone" placeholder="+1809..."/>
           <div style="height:12px;"></div>
+
+          <label class="muted">Contraseña</label>
+          <input name="password" type="password" placeholder="••••••"/>
+          <div style="height:12px;"></div>
+
           <button class="btn" type="submit">Entrar</button>
-          <a class="btn ghost" href="/" style="margin-left:10px;">🏠 Inicio</a>
+          <a class="btn ghost" href="/client/signup" style="margin-left:10px;">✨ Crear cuenta</a>
         </form>
+        <div class="hr"></div>
+        <p class="muted">¿Olvidaste tu clave? <a href="/client/reset" style="color:white;">Resetear contraseña</a></p>
       </div>
     </div>
     """
-    return page("Admin Login", body, subtitle="Ingreso seguro")
-
+    return page("Cliente • Login", body, subtitle="Acceso seguro")
 
 @app.post("/admin/login")
 def admin_login(password: str = Form(...)):
