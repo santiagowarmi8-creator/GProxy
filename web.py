@@ -26,21 +26,20 @@ from fastapi.staticfiles import StaticFiles
 
 
 # ====== CONFIG EMAIL (PON TUS DATOS AQUÍ) ======
+# ====== EMAIL ======
 import smtplib
 from email.message import EmailMessage
 
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-
-# ✅ Aquí van los NOMBRES de variables de entorno
 SMTP_USER = os.getenv("SMTP_USER", "").strip()
 SMTP_PASS = os.getenv("SMTP_PASS", "").strip()
 SMTP_FROM = os.getenv("SMTP_FROM", "").strip() or SMTP_USER
 
-
 def send_email(to_email: str, subject: str, body: str):
-    if not SMTP_USER or not SMTP_PASS:
-        print("⚠️ SMTP_USER/SMTP_PASS vacíos. No se enviará email.")
+    to_email = (to_email or "").strip()
+    if not (SMTP_USER and SMTP_PASS and to_email):
+        print("⚠️ Email no enviado: falta SMTP_USER/SMTP_PASS o destinatario vacío")
         return
 
     msg = EmailMessage()
@@ -49,11 +48,13 @@ def send_email(to_email: str, subject: str, body: str):
     msg["Subject"] = subject
     msg.set_content(body)
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as s:
+    with smtplib.SMTP(SMTP_HOST, int(SMTP_PORT), timeout=20) as s:
         s.ehlo()
         s.starttls()
         s.login(SMTP_USER, SMTP_PASS)
         s.send_message(msg)
+
+    print(f"✅ Email enviado a {to_email} ({subject})")
 
 
 
@@ -520,7 +521,10 @@ def ensure_schema() -> str:
             _ensure_column(conn, "accounts", col, coldef)
         except Exception:
             pass
-
+try:
+    _ensure_column(conn, "accounts", "email", "TEXT NOT NULL DEFAULT ''")
+except Exception:
+    pass
 
     # signup_pins
     _ensure_table(
@@ -797,6 +801,9 @@ def page(title: str, body: str, subtitle: str = "") -> str:
     th{{color:#f0eaff; font-weight:900}}
     pre,code{{background:rgba(0,0,0,.25); border:1px solid rgba(255,255,255,.10); border-radius:14px; padding:12px; overflow:auto}}
     pre{{white-space:pre-wrap; word-break:break-word}}
+table { display:block; overflow-x:auto; }
+td form { max-width: 520px; }
+textarea { max-width:100%; }
     .pill{{display:inline-flex; gap:8px; padding:8px 10px; border-radius:999px; border:1px solid rgba(255,255,255,.10); background:rgba(0,0,0,.18); font-size:12px}}
     .pinbox{{border:1px dashed rgba(255,255,255,.22); background:rgba(0,0,0,.18); border-radius:18px; padding:14px}}
     .badge{{display:inline-flex; align-items:center; justify-content:center; min-width:22px; height:22px; padding:0 8px; border-radius:999px; background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.14); font-size:12px; font-weight:900; color:white}}
@@ -1566,8 +1573,8 @@ def admin_orders(admin=Depends(require_admin), state: str = ""):
         try:
             if state:
                 cur.execute(
-                    "SELECT id,user_id,tipo,ip,cantidad,monto,estado,created_at,voucher_path,target_proxy_id,note "
-                    "FROM requests WHERE estado=? ORDER BY id DESC LIMIT 160",
+                    "SELECT id,user_id,tipo,ip,cantidad,monto,estado,created_at,voucher_path,target_proxy_id,note, email "
+"FROM requests WHERE estado=? ORDER BY id DESC LIMIT 160",
                     (state,),
                 )
             else:
@@ -1606,6 +1613,7 @@ def admin_orders(admin=Depends(require_admin), state: str = ""):
                 <textarea name="delivery_raw" placeholder="ip:port:user:pass&#10;ip:port:user:pass"></textarea>
               </div>
             """
+<textarea style="width:100%; max-width:520px;" ...></textarea>
 
         approve_form = f"""
           <form method="post" action="/admin/order/{rid}/approve" style="display:inline; min-width:320px;">
@@ -1676,6 +1684,8 @@ def _deliver_buy_add_proxies(conn: sqlite3.Connection, user_id: int, raw_text: s
     #     ip:port:user:pass
     #     HTTP
     #     ip:port:user:pass
+start = day_floor(datetime.now())
+vdt = start + timedelta(days=dias)
 
     lines = [ln.strip() for ln in (raw_text or "").splitlines()]
     items = []
@@ -1708,7 +1718,7 @@ def _deliver_buy_add_proxies(conn: sqlite3.Connection, user_id: int, raw_text: s
         raise HTTPException(400, f"Pegaste {len(items)} proxies pero el pedido es de {qty}.")
 
     start = datetime.now()
-    vdt = start + timedelta(days=dias)
+vdt = start + timedelta(days=dias)
     cur = conn.cursor()
 
     for raw in items[:qty]:
@@ -1770,140 +1780,26 @@ def _deliver_claim_add_proxy(conn: sqlite3.Connection, user_id: int, note: str):
     )
 
 
-@app.post("/admin/order/{rid}/approve")
-def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(require_admin)):
-    dias = int(float(get_setting("dias_proxy", str(DEFAULT_DIAS_PROXY)) or DEFAULT_DIAS_PROXY))
-    if dias > 30:
-        dias = 30
-    if dias <= 0:
-        dias = DEFAULT_DIAS_PROXY
-
+@app.post("/admin/proxy/{pid}/delete")
+def admin_proxy_delete(pid: int, admin=Depends(require_admin)):
     def _do():
         conn = db_conn()
         cur = conn.cursor()
-
-        cur.execute(
-            "SELECT id, user_id, tipo, cantidad, target_proxy_id, note, email "
-            "FROM requests WHERE id=?",
-            (int(rid),),
-        )
-        req = cur.fetchone()
-        if not req:
+        cur.execute("SELECT id, user_id FROM proxies WHERE id=?", (int(pid),))
+        r = cur.fetchone()
+        if not r:
             conn.close()
-            raise HTTPException(404, "Pedido no encontrado")
-
-        tipo = (req["tipo"] or "").strip()
-        uid = int(req["user_id"])
-        qty = max(1, int(req["cantidad"] or 1))
-        target_proxy_id = int(req["target_proxy_id"] or 0)
-        note = (req["note"] or "").strip()
-        email = (req["email"] or "").strip()
-
-        delivered = False
-
-        if tipo == "buy":
-            ok = _deliver_buy_only_count(qty)
-            if not ok:
-                conn.close()
-                raise HTTPException(400, "Stock insuficiente para aprobar esta compra.")
-
-            if (delivery_raw or "").strip():
-                _deliver_buy_add_proxies(conn, uid, delivery_raw, qty, dias)
-                delivered = True
-
-        elif tipo == "renew":
-            if target_proxy_id <= 0:
-                conn.close()
-                raise HTTPException(400, "Renovación sin Proxy ID.")
-            _deliver_renew_extend(conn, uid, target_proxy_id, dias)
-
-        elif tipo == "claim":
-            _deliver_claim_add_proxy(conn, uid, note)
-
-        cur.execute("UPDATE requests SET estado=? WHERE id=?", ("approved", int(rid)))
+            raise HTTPException(404, "Proxy no encontrada")
+        uid = int(r["user_id"])
+        cur.execute("DELETE FROM proxies WHERE id=?", (int(pid),))
         conn.commit()
         conn.close()
+        return uid
 
-        # Notificaciones internas (panel)
-        if tipo == "buy":
-            if delivered:
-                notify_user(uid, f"✅ Compra aprobada y entregada. Se agregaron {qty} proxies a tu cuenta.")
-            else:
-                notify_user(uid, f"✅ Compra aprobada. (Pendiente entrega de {qty} proxies por el admin).")
-        elif tipo == "renew":
-            notify_user(uid, f"✅ Renovación aprobada. Proxy #{target_proxy_id} extendida {dias} días.")
-        elif tipo == "claim":
-            notify_user(uid, "✅ Tu proxy existente fue verificada y agregada a tu cuenta.")
-        else:
-            notify_user(uid, "✅ Tu pedido fue aprobado.")
-
-        admin_log("order_approve", json.dumps({"rid": rid, "tipo": tipo, "uid": uid}, ensure_ascii=False))
-
-        return {
-            "rid": int(rid),
-            "tipo": tipo,
-            "qty": qty,
-            "dias": dias,
-            "target_proxy_id": target_proxy_id,
-            "email": email,
-            "delivered": delivered,
-            "delivery_raw": (delivery_raw or "").strip(),
-        }
-
-    info = _retry_sqlite(_do)
-
-    # Email al cliente (solo si dejó Gmail)
-    try:
-        if info["email"]:
-            if info["tipo"] == "buy" and info["delivered"]:
-                subject = f"✅ Proxies entregadas (Pedido #{info['rid']})"
-                body = (
-                    "Hola!\n\n"
-                    "Tu compra fue aprobada y tus proxies fueron entregadas.\n\n"
-                    f"Pedido: #{info['rid']}\n"
-                    f"Cantidad: {info['qty']}\n\n"
-                    f"PROXIES:\n{info['delivery_raw']}\n\n"
-                    f"Gracias,\n{APP_TITLE}\n"
-                )
-                send_email(info["email"], subject, body)
-
-            elif info["tipo"] == "buy" and not info["delivered"]:
-                subject = f"✅ Compra aprobada (Pedido #{info['rid']})"
-                body = (
-                    "Hola!\n\n"
-                    "Tu compra fue aprobada.\n\n"
-                    f"Pedido: #{info['rid']}\n"
-                    f"Cantidad: {info['qty']}\n\n"
-                    "Nota: el admin aún no ha entregado las proxies. Te avisaremos cuando estén.\n\n"
-                    f"Gracias,\n{APP_TITLE}\n"
-                )
-                send_email(info["email"], subject, body)
-
-            elif info["tipo"] == "renew":
-                subject = f"✅ Renovación aprobada (Pedido #{info['rid']})"
-                body = (
-                    "Hola!\n\n"
-                    "Tu renovación fue aprobada.\n\n"
-                    f"Pedido: #{info['rid']}\n"
-                    f"Proxy ID: #{info['target_proxy_id']}\n"
-                    f"Días extendidos: {info['dias']}\n\n"
-                    f"Gracias,\n{APP_TITLE}\n"
-                )
-                send_email(info["email"], subject, body)
-
-            elif info["tipo"] == "claim":
-                subject = f"✅ Proxy verificada y agregada (Pedido #{info['rid']})"
-                body = (
-                    "Hola!\n\n"
-                    "Tu proxy existente fue verificada y agregada a tu cuenta.\n\n"
-                    f"Pedido: #{info['rid']}\n\n"
-                    f"Gracias,\n{APP_TITLE}\n"
-                )
-                send_email(info["email"], subject, body)
-    except Exception:
-        pass
-
-    return RedirectResponse(url="/admin/orders", status_code=302)
+    uid = _retry_sqlite(_do)
+    admin_log("proxy_delete", json.dumps({"pid": pid, "uid": uid}, ensure_ascii=False))
+    notify_user(uid, f"🗑 El administrador eliminó tu proxy #{pid}.")
+    return RedirectResponse(url=f"/admin/user/{uid}", status_code=302)
 
 
 # =========================
@@ -2090,6 +1986,9 @@ def client_signup_page():
       </div>
       <div class="card">
         <form method="post" action="/client/signup">
+	  <label class="muted">Gmail (opcional)</label>
+<input name="email" placeholder="tuemail@gmail.com"/>
+<div style="height:12px;"></div>
           <label class="muted">Teléfono</label>
           <input name="phone" placeholder="+1809..."/>
           <div style="height:12px;"></div>
@@ -2118,6 +2017,13 @@ def client_signup(phone: str = Form(...), password: str = Form(...), recovery_pi
     phone = _normalize_phone(phone)
     password = (password or "").strip()
     recovery_pin = (recovery_pin or "").strip()
+
+email = (email or "").strip()
+
+cur.execute(
+ "INSERT INTO accounts(phone,password_hash,recovery_pin_hash,verified,email,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+ (phone, pwd_hash, rec_hash, 0, email, now_str(), now_str())
+)
 
     if not phone or len(phone) < 8:
         return nice_error_page("Datos inválidos", "Teléfono inválido.", "/client/signup", "↩️ Volver")
@@ -2240,6 +2146,24 @@ def client_verify(phone: str = Form(...), pin: str = Form(...)):
 
     return nice_error_page("Cuenta verificada", "Ya puedes iniciar sesión.", "/client/login", "🔐 Iniciar sesión")
 
+# después de status ok
+def _get_email():
+    conn = db_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id, email FROM accounts WHERE phone=?", (phone,))
+    r = cur.fetchone()
+    conn.close()
+    return (int(r["id"]), (r["email"] or "").strip()) if r else (0, "")
+
+uid, email = _retry_sqlite(_get_email)
+if uid:
+    notify_user(uid, f"🎉 Bienvenido a {APP_TITLE}. Tu cuenta ya está verificada.")
+    if email:
+        send_email(
+            email,
+            f"🎉 Bienvenido a {APP_TITLE}",
+            f"Hola!\n\nTu cuenta fue verificada con éxito.\n\nYa puedes comprar y gestionar tus proxies desde tu panel.\n\nGracias,\n{APP_TITLE}\n"
+        )
 
 @app.get("/client/login", response_class=HTMLResponse)
 def client_login_page():
@@ -2476,6 +2400,14 @@ def client_me(client=Depends(require_client)):
             if vence
             else "<span class='badge'>-</span>"
         )
+
+<th>Acciones</th>
+
+f"<td>
+  <form method='post' action='/admin/proxy/{int(r['id'])}/delete' onsubmit=\"return confirm('Eliminar proxy?')\">
+    <button class='btn bad' type='submit'>🗑 Eliminar</button>
+  </form>
+</td>"
 
         phtml += f"""
         <div class="card">
@@ -2785,8 +2717,15 @@ def client_buy_submit(cantidad: str = Form("1"), email: str = Form(""), client=D
         qty = 1
 
     p1 = int(float(get_setting("precio_primera", "1500") or 1500))
-    currency = get_setting("currency", "DOP")
-    monto = int(p1 * qty)
+
+if qty >= 10:
+    unit = 700
+elif qty >= 5:
+    unit = 800
+else:
+    unit = p1
+
+monto = unit * qty
 
     def _do():
         conn = db_conn()
