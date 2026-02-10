@@ -31,14 +31,17 @@ from email.message import EmailMessage
 
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("santiagowarmi8@gmail.com", "").strip()   # tu gmail
-SMTP_PASS = os.getenv("itoe hmvu jqqt rcyo", "").strip()   # app password (itoe hmvu jqqt rcyo)
-SMTP_FROM = os.getenv("santiagowarmi8@gmail.com", "").strip() or SMTP_USER
+
+# ✅ Aquí van los NOMBRES de variables de entorno
+SMTP_USER = os.getenv("SMTP_USER", "").strip()
+SMTP_PASS = os.getenv("SMTP_PASS", "").strip()
+SMTP_FROM = os.getenv("SMTP_FROM", "").strip() or SMTP_USER
 
 
 def send_email(to_email: str, subject: str, body: str):
     if not SMTP_USER or not SMTP_PASS:
-        return  # si no configuraste SMTP, no revientes el panel
+        print("⚠️ SMTP_USER/SMTP_PASS vacíos. No se enviará email.")
+        return
 
     msg = EmailMessage()
     msg["From"] = SMTP_FROM
