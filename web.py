@@ -613,6 +613,35 @@ def html_escape(s: str) -> str:
 def _support_fab_html() -> str:
     return """<a href="/support" class="support-fab">💬</a>"""
 
+def _normalize_phone(phone: str) -> str:
+    """
+    Normaliza el teléfono para que siempre se guarde y se busque igual.
+    - Conserva un '+' inicial si existe.
+    - Elimina espacios, guiones, paréntesis, etc.
+    - Convierte prefijo 00xxxx -> +xxxx (común en algunos países).
+    """
+    p = (phone or "").strip()
+    if not p:
+        return ""
+
+    # convertir 00xxxx a +xxxx
+    if p.startswith("00"):
+        p = "+" + p[2:]
+
+    # permitir solo dígitos, y un '+' al inicio
+    out = []
+    for ch in p:
+        if ch.isdigit():
+            out.append(ch)
+        elif ch == "+" and not out:
+            out.append(ch)
+
+    # evita que quede solo '+'
+    if out == ["+"]:
+        return ""
+
+    return "".join(out)
+
 
 def page(title: str, body: str, subtitle: str = "") -> str:
     t = html_escape(title)
@@ -3060,6 +3089,7 @@ def api_outbox(admin=Depends(require_admin)):
 
     rows = _retry_sqlite(_do)
     return {"enabled": True, "items": rows}
+
 
 
 
