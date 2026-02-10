@@ -1534,12 +1534,13 @@ def admin_orders(admin=Depends(require_admin), state: str = ""):
             extra = f" • Proxy #{int(r['target_proxy_id'])}"
 
         deliver_box = ""
-        if tipo == "buy":
-            deliver_box = f"""
-              <div style="margin-top:8px;">
-                <label class="muted">Pega aquí {qty} proxies (RAW) — 1 por línea</label>
-                <textarea name="deliver_raw" placeholder="HTTP&#10;ip:port:user:pass&#10;HTTP&#10;ip:port:user:pass"></textarea>
-              </div>
+if tipo == "buy":
+    deliver_box = f"""
+      <div style="margin-top:8px;">
+        <label class="muted">Pega aquí {qty} proxies (RAW) — 1 por línea</label>
+        <textarea name="delivery_raw" placeholder="ip:port:user:pass&#10;ip:port:user:pass"></textarea>
+      </div>
+    """
             """
 
         approve_form = f"""
@@ -1604,25 +1605,57 @@ def _deliver_buy_only_count(qty: int) -> bool:
     return True
 
 def _deliver_buy_add_proxies(conn: sqlite3.Connection, user_id: int, raw_text: str, qty: int, dias: int):
-    lines = [ln.strip() for ln in (raw_text or "").splitlines() if ln.strip()]
-    if len(lines) < qty:
-        raise HTTPException(400, f"Pegaste {len(lines)} proxies pero el pedido es de {qty}.")
+    # Soporta:
+    # - 1 proxy por línea: ip:port:user:pass
+    # - Bloques tipo:
+    #     HTTP
+    #     ip:port:user:pass
+    #     HTTP
+    #     ip:port:user:pass
+
+    lines = [ln.strip() for ln in (raw_text or "").splitlines()]
+    items = []
+    i = 0
+
+    while i < len(lines) and len(items) < qty:
+        ln = lines[i].strip()
+        if not ln:
+            i += 1
+            continue
+
+        up = ln.upper()
+        if up in ("HTTP", "HTTPS", "SOCKS5", "SOCKS4"):
+            # el proxy real debe estar en la siguiente línea
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            if j >= len(lines):
+                break
+            proxy_line = lines[j].strip()
+            items.append(f"{up}\n{proxy_line}")
+            i = j + 1
+            continue
+
+        # normal: una sola línea ya es proxy
+        items.append(ln)
+        i += 1
+
+    if len(items) < qty:
+        raise HTTPException(400, f"Pegaste {len(items)} proxies pero el pedido es de {qty}.")
 
     start = datetime.now()
     vdt = start + timedelta(days=dias)
-
     cur = conn.cursor()
-    for i in range(qty):
-        raw = lines[i]
-        # Sacar IP base
-        ip = raw
-        first = raw.splitlines()[0].strip()
+
+    for raw in items[:qty]:
+        first = raw.splitlines()[-1].strip()  # si es HTTP\nxxx, tomamos xxx
         ip = first.replace("http://", "").replace("https://", "").split()[0]
 
         cur.execute(
             "INSERT INTO proxies(user_id,ip,inicio,vence,estado,raw) VALUES(?,?,?,?,?,?)",
             (int(user_id), ip, fmt_dt(start), fmt_dt(vdt), "active", raw),
         )
+
 
 
 def _deliver_renew_extend(conn: sqlite3.Connection, user_id: int, proxy_id: int, dias: int):
@@ -3089,6 +3122,7 @@ def api_outbox(admin=Depends(require_admin)):
 
     rows = _retry_sqlite(_do)
     return {"enabled": True, "items": rows}
+
 
 
 
