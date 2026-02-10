@@ -26,7 +26,6 @@ from fastapi.staticfiles import StaticFiles
 
 
 # ====== CONFIG EMAIL (PON TUS DATOS AQUÍ) ======
-# ====== EMAIL ======
 import smtplib
 from email.message import EmailMessage
 
@@ -55,7 +54,6 @@ def send_email(to_email: str, subject: str, body: str):
         s.send_message(msg)
 
     print(f"✅ Email enviado a {to_email} ({subject})")
-
 
 
 # =========================
@@ -124,10 +122,8 @@ def parse_dt(s: str) -> Optional[datetime]:
     except Exception:
         return None
 
-
 def fmt_dt(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S")
-
 
 def _time_plus_minutes(minutes: int) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() + minutes * 60))
@@ -189,7 +185,6 @@ def get_setting(key: str, default: str = "") -> str:
         row = cur.fetchone()
         conn.close()
         return (row["value"] if row else default) or default
-
     return _retry_sqlite(_do)
 
 
@@ -204,7 +199,6 @@ def set_setting(key: str, value: str):
         )
         conn.commit()
         conn.close()
-
     _retry_sqlite(_do)
 
 
@@ -221,7 +215,6 @@ def outbox_add(kind: str, message: str):
         )
         conn.commit()
         conn.close()
-
     _retry_sqlite(_do)
 
 
@@ -235,8 +228,8 @@ def admin_log(action: str, details: str = ""):
         )
         conn.commit()
         conn.close()
-
     _retry_sqlite(_do)
+
 
 def notify_user(user_id: int, message: str):
     def _do():
@@ -248,7 +241,6 @@ def notify_user(user_id: int, message: str):
         )
         conn.commit()
         conn.close()
-
     _retry_sqlite(_do)
 
 
@@ -258,11 +250,9 @@ def notify_user(user_id: int, message: str):
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode().rstrip("=")
 
-
 def _b64urldecode(s: str) -> bytes:
     s += "=" * (-len(s) % 4)
     return base64.urlsafe_b64decode(s.encode())
-
 
 def sign(payload: Dict[str, Any], secret: str, exp_seconds: int = 3600) -> str:
     p = dict(payload)
@@ -270,7 +260,6 @@ def sign(payload: Dict[str, Any], secret: str, exp_seconds: int = 3600) -> str:
     raw = json.dumps(p, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     sig = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).digest()
     return f"{_b64url(raw)}.{_b64url(sig)}"
-
 
 def verify(token: str, secret: str) -> Dict[str, Any]:
     if not token:
@@ -319,22 +308,22 @@ def _account_is_blocked_and_touch_last_seen(uid: int) -> bool:
         conn = db_conn()
         cur = conn.cursor()
 
-        # is_blocked puede no existir en DB viejas hasta que corra ensure_schema()
         blocked = 0
         try:
             cur.execute("SELECT is_blocked FROM accounts WHERE id=?", (int(uid),))
             row = cur.fetchone()
             if row is None:
                 conn.close()
-                return True  # si no existe la cuenta, tratamos como bloqueado/no válido
+                return True
             blocked = int(row["is_blocked"] or 0)
         except Exception:
-            # si la columna no existe todavía, no bloqueamos aquí
             blocked = 0
 
-        # touch last_seen (si existe)
         try:
-            cur.execute("UPDATE accounts SET last_seen=?, updated_at=? WHERE id=?", (now_str(), now_str(), int(uid)))
+            cur.execute(
+                "UPDATE accounts SET last_seen=?, updated_at=? WHERE id=?",
+                (now_str(), now_str(), int(uid)),
+            )
             conn.commit()
         except Exception:
             pass
@@ -357,7 +346,6 @@ def require_client(request: Request) -> Dict[str, Any]:
     if uid <= 0:
         raise HTTPException(401, "No autorizado")
 
-    # Bloqueo real (si el admin lo activó)
     if _account_is_blocked_and_touch_last_seen(uid):
         raise HTTPException(403, "Tu cuenta está bloqueada. Contacta soporte.")
 
@@ -365,6 +353,10 @@ def require_client(request: Request) -> Dict[str, Any]:
 
 
 def try_client(request: Request) -> Optional[Dict[str, Any]]:
+    """
+    Devuelve payload del cliente si hay sesión válida, si no, None.
+    ✅ FIX: eliminado código muerto que referenciaba 'conn' inexistente.
+    """
     try:
         if not CLIENT_SECRET:
             return None
@@ -381,18 +373,12 @@ def try_client(request: Request) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
-    # accounts email column
-    try:
-        _ensure_column(conn, "accounts", "email", "TEXT NOT NULL DEFAULT ''")
-    except Exception:
-        pass
 
 # =========================
 # Password hashing
 # =========================
 def _pbkdf2_hash(password: str, salt: bytes, rounds: int = 200_000) -> bytes:
     return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, rounds)
-
 
 def password_make_hash(password: str) -> str:
     pwd = (password or "").strip()
@@ -401,7 +387,6 @@ def password_make_hash(password: str) -> str:
     salt = secrets.token_bytes(16)
     dk = _pbkdf2_hash(pwd, salt)
     return "pbkdf2_sha256$200000$%s$%s" % (_b64url(salt), _b64url(dk))
-
 
 def password_check(password: str, stored: str) -> bool:
     try:
@@ -426,7 +411,6 @@ def password_check(password: str, stored: str) -> bool:
 def pin_hash(pin: str, secret: str) -> str:
     return hmac.new(secret.encode("utf-8"), pin.encode("utf-8"), hashlib.sha256).hexdigest()
 
-
 def _pin_gen(n: int = 6) -> str:
     return "".join(str(secrets.randbelow(10)) for _ in range(n))
 
@@ -438,8 +422,6 @@ def ensure_schema() -> str:
     conn = db_conn()
     cur = conn.cursor()
 
-    # 1) settings (compat con DB vieja)
-    #    Primero crea la tabla "mínima" (key,value) si no existe.
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS settings(
@@ -450,21 +432,17 @@ def ensure_schema() -> str:
     )
     conn.commit()
 
-    # 2) Luego aseguramos updated_at (migración)
     try:
         _ensure_column(conn, "settings", "updated_at", "TEXT NOT NULL DEFAULT ''")
     except Exception:
-        # si por algo falla, no tumbes el startup
         pass
 
-    # 3) Ya es seguro insertar usando updated_at
     def ins(key: str, value: str):
         cur.execute(
             "INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES(?,?,?)",
             (key, value, now_str()),
         )
 
-    # defaults
     ins("maintenance_enabled", "0")
     ins("maintenance_message", "⚠️ Estamos en mantenimiento. Vuelve en unos minutos.")
     ins("bank_title", "Cuenta bancaria")
@@ -475,7 +453,6 @@ def ensure_schema() -> str:
     ins("currency", "DOP")
     ins("stock_available", "0")
 
-    # accounts
     _ensure_table(
         conn,
         """
@@ -483,6 +460,7 @@ def ensure_schema() -> str:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             phone TEXT UNIQUE NOT NULL,
             email TEXT NOT NULL DEFAULT '',
+            role TEXT NOT NULL DEFAULT 'client',
             password_hash TEXT NOT NULL,
             recovery_pin_hash TEXT NOT NULL DEFAULT '',
             verified INTEGER NOT NULL DEFAULT 0,
@@ -494,9 +472,9 @@ def ensure_schema() -> str:
         """,
     )
 
-    # Migraciones seguras para DB vieja (solo agrega si faltan)
     for col, coldef in [
         ("email", "TEXT NOT NULL DEFAULT ''"),
+        ("role", "TEXT NOT NULL DEFAULT 'client'"),
         ("recovery_pin_hash", "TEXT NOT NULL DEFAULT ''"),
         ("verified", "INTEGER NOT NULL DEFAULT 0"),
         ("is_blocked", "INTEGER NOT NULL DEFAULT 0"),
@@ -509,7 +487,6 @@ def ensure_schema() -> str:
         except Exception:
             pass
 
-    # signup_pins
     _ensure_table(
         conn,
         """
@@ -525,7 +502,6 @@ def ensure_schema() -> str:
         """,
     )
 
-    # tickets
     _ensure_table(
         conn,
         """
@@ -542,7 +518,6 @@ def ensure_schema() -> str:
         """,
     )
 
-    # notifications
     _ensure_table(
         conn,
         """
@@ -556,7 +531,6 @@ def ensure_schema() -> str:
         """,
     )
 
-    # admin logs
     _ensure_table(
         conn,
         """
@@ -569,7 +543,6 @@ def ensure_schema() -> str:
         """,
     )
 
-    # outbox
     if ENABLE_OUTBOX:
         _ensure_table(
             conn,
@@ -584,7 +557,6 @@ def ensure_schema() -> str:
             """,
         )
 
-    # persist CLIENT_SECRET
     cur.execute("SELECT value FROM settings WHERE key=?", ("client_secret_persist",))
     row = cur.fetchone()
     db_secret = (row["value"] if row else "").strip()
@@ -613,7 +585,6 @@ def ensure_schema() -> str:
     if not PIN_SECRET:
         PIN_SECRET = client_secret
 
-    # Migraciones en tablas del bot (si existen)
     try:
         _ensure_column(conn, "requests", "voucher_path", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "requests", "voucher_uploaded_at", "TEXT NOT NULL DEFAULT ''")
@@ -649,39 +620,24 @@ def _startup():
 def html_escape(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-
 def _support_fab_html() -> str:
     return """<a href="/support" class="support-fab">💬</a>"""
 
 def _normalize_phone(phone: str) -> str:
-    """
-    Normaliza el teléfono para que siempre se guarde y se busque igual.
-    - Conserva un '+' inicial si existe.
-    - Elimina espacios, guiones, paréntesis, etc.
-    - Convierte prefijo 00xxxx -> +xxxx (común en algunos países).
-    """
     p = (phone or "").strip()
     if not p:
         return ""
-
-    # convertir 00xxxx a +xxxx
     if p.startswith("00"):
         p = "+" + p[2:]
-
-    # permitir solo dígitos, y un '+' al inicio
     out = []
     for ch in p:
         if ch.isdigit():
             out.append(ch)
         elif ch == "+" and not out:
             out.append(ch)
-
-    # evita que quede solo '+'
     if out == ["+"]:
         return ""
-
     return "".join(out)
-
 
 def page(title: str, body: str, subtitle: str = "") -> str:
     t = html_escape(title)
@@ -783,9 +739,9 @@ def page(title: str, body: str, subtitle: str = "") -> str:
     th,td{{border-bottom:1px solid rgba(255,255,255,.10); padding:12px; text-align:left; font-size:13px; vertical-align:top}}
     th{{color:#f0eaff; font-weight:900}}
     pre,code{{background:rgba(0,0,0,.25); border:1px solid rgba(255,255,255,.10); border-radius:14px; padding:12px; overflow:auto}}
-    pre{{white-space:pre-wrap; word-break:break-word}}
+    pre{{white-space:pre-wrap; word-break:break-word; overflow-wrap:anywhere}}
 
-    /* ✅ FIX: en f-strings hay que escapar llaves */
+    /* ✅ FIX: llaves escapadas dentro del f-string */
     table {{ display:block; overflow-x:auto; }}
     td form {{ max-width: 520px; }}
     textarea {{ max-width:100%; }}
@@ -860,7 +816,6 @@ async def http_exc_handler(request: Request, exc: HTTPException):
     if exc.status_code == 503:
         return nice_error_page("Servidor ocupado", "Estamos iniciando o el servidor está ocupado. Intenta de nuevo.", "/", "🔄 Reintentar")
     return nice_error_page("Ups", str(exc.detail or "Ocurrió un error."), "/", "🏠 Inicio")
-
 
 @app.exception_handler(Exception)
 async def unhandled_exc_handler(request: Request, exc: Exception):
@@ -984,14 +939,6 @@ def admin_logout():
     return resp
 
 
-
-@app.get("/admin/logout")
-def admin_logout():
-    resp = RedirectResponse(url="/", status_code=302)
-    resp.delete_cookie("admin_session")
-    return resp
-
-
 # =========================
 # ADMIN DASHBOARD
 # =========================
@@ -1011,7 +958,6 @@ def admin_dashboard(admin=Depends(require_admin)):
         return _retry_sqlite(_do)
 
     accounts = count("SELECT COUNT(*) FROM accounts")
-    # del bot (si existe)
     proxies = count("SELECT COUNT(*) FROM proxies")
     pending = count("SELECT COUNT(*) FROM requests WHERE estado IN ('awaiting_voucher','voucher_received','awaiting_admin_verify')")
     tickets = count("SELECT COUNT(*) FROM tickets WHERE status='open'")
@@ -1065,7 +1011,6 @@ def admin_dashboard(admin=Depends(require_admin)):
     </div>
     """
     return page("Admin", body, subtitle="Panel premium")
-
 
 # =========================
 # ADMIN SETTINGS / STOCK / MAINTENANCE / RESET
@@ -1328,9 +1273,6 @@ def admin_reset_do(
     return nice_error_page("Limpieza lista", "Se aplicó la limpieza seleccionada.", "/admin", "⬅️ Volver al Dashboard")
 
 # =========================
-# ADMIN: accounts (FIXED)
-# =========================
-# =========================
 # ADMIN: accounts
 # =========================
 @app.get("/admin/accounts", response_class=HTMLResponse)
@@ -1344,20 +1286,26 @@ def admin_accounts(admin=Depends(require_admin), q: str = ""):
         if q:
             cur.execute(
                 """
-                SELECT id, phone, verified, created_at, updated_at,
+                SELECT id, phone,
+                       COALESCE(email,'') AS email,
+                       COALESCE(role,'client') AS role,
+                       verified, created_at, updated_at,
                        COALESCE(is_blocked,0) AS is_blocked,
                        COALESCE(last_seen,'') AS last_seen
                 FROM accounts
-                WHERE CAST(id AS TEXT) LIKE ? OR phone LIKE ?
+                WHERE CAST(id AS TEXT) LIKE ? OR phone LIKE ? OR email LIKE ?
                 ORDER BY id DESC
                 LIMIT 200
                 """,
-                (f"%{q}%", f"%{q}%"),
+                (f"%{q}%", f"%{q}%", f"%{q}%"),
             )
         else:
             cur.execute(
                 """
-                SELECT id, phone, verified, created_at, updated_at,
+                SELECT id, phone,
+                       COALESCE(email,'') AS email,
+                       COALESCE(role,'client') AS role,
+                       verified, created_at, updated_at,
                        COALESCE(is_blocked,0) AS is_blocked,
                        COALESCE(last_seen,'') AS last_seen
                 FROM accounts
@@ -1376,15 +1324,17 @@ def admin_accounts(admin=Depends(require_admin), q: str = ""):
         uid = int(r["id"])
         verified = "✅ Verificado" if int(r["verified"] or 0) == 1 else "⏳ Sin verificar"
         blocked = "🚫 Bloqueado" if int(r["is_blocked"] or 0) == 1 else "✅ Activo"
+        role = (r["role"] or "client").strip()
 
         trs += (
             "<tr>"
             f"<td><code>{uid}</code></td>"
             f"<td>{html_escape(r['phone'] or '')}</td>"
+            f"<td>{html_escape(r['email'] or '')}</td>"
+            f"<td>{html_escape(role)}</td>"
             f"<td>{verified}</td>"
             f"<td>{blocked}</td>"
             f"<td>{html_escape(r['created_at'] or '')}</td>"
-            f"<td>{html_escape(r['updated_at'] or '')}</td>"
             f"<td><a class='btn ghost' href='/admin/user/{uid}'>Ver</a></td>"
             "</tr>"
         )
@@ -1401,8 +1351,8 @@ def admin_accounts(admin=Depends(require_admin), q: str = ""):
 
     <div class="card">
       <form method="get" action="/admin/accounts">
-        <label class="muted">Buscar por ID o Teléfono</label>
-        <input name="q" value="{html_escape(q)}" placeholder="Ej: 1 o +1809..."/>
+        <label class="muted">Buscar por ID / Teléfono / Email</label>
+        <input name="q" value="{html_escape(q)}" placeholder="Ej: 1 o +1809... o gmail"/>
         <div style="height:12px;"></div>
         <button class="btn" type="submit">Buscar</button>
       </form>
@@ -1411,9 +1361,9 @@ def admin_accounts(admin=Depends(require_admin), q: str = ""):
     <div class="card">
       <table>
         <tr>
-          <th>ID</th><th>Teléfono</th><th>Verificación</th><th>Estado</th><th>Creado</th><th>Actualizado</th><th></th>
+          <th>ID</th><th>Teléfono</th><th>Email</th><th>Role</th><th>Verificación</th><th>Estado</th><th>Creado</th><th></th>
         </tr>
-        {trs or "<tr><td colspan='7' class='muted'>No hay usuarios todavía.</td></tr>"}
+        {trs or "<tr><td colspan='8' class='muted'>No hay usuarios todavía.</td></tr>"}
       </table>
     </div>
     """
@@ -1448,11 +1398,11 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
         conn = db_conn()
         cur = conn.cursor()
 
-        # ✅ OJO: Traemos email con COALESCE para no romper si está vacío
         cur.execute(
             """
             SELECT id, phone,
                    COALESCE(email,'') AS email,
+                   COALESCE(role,'client') AS role,
                    verified,
                    COALESCE(is_blocked,0) AS is_blocked,
                    COALESCE(last_seen,'') AS last_seen,
@@ -1495,8 +1445,8 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
 
     blocked = int(u["is_blocked"] or 0)
     tag = "🚫 BLOQUEADO" if blocked == 1 else "✅ ACTIVO"
+    role = (u["role"] or "client").strip()
 
-    # ✅ Tabla de proxies (incluye botón eliminar)
     phtml = ""
     for r in proxies_rows:
         pid = int(r["id"])
@@ -1517,7 +1467,6 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
     if not phtml:
         phtml = "<tr><td colspan='5' class='muted'>Sin proxies</td></tr>"
 
-    # ✅ Tabla de pedidos
     ohtml = ""
     for r in req_rows:
         voucher = (r["voucher_path"] or "").strip()
@@ -1560,8 +1509,9 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
       <div class="muted">Usuario</div>
       <div class="kpi">{int(user_id)}</div>
 
-      <!-- ✅ AQUÍ ES DONDE VA EL “•” (DENTRO DEL STRING) -->
-      <p class="muted">{html_escape(u['phone'] or '')} • {html_escape(u['email'] or '')} • {tag}</p>
+      <p class="muted">
+        {html_escape(u['phone'] or '')} • {html_escape(u['email'] or '')} • role: <b>{html_escape(role)}</b> • {tag}
+      </p>
 
       <p class="muted">Última vez: {html_escape(u['last_seen'] or '-')}</p>
     </div>
@@ -1598,13 +1548,15 @@ def admin_orders(admin=Depends(require_admin), state: str = ""):
         try:
             if state:
                 cur.execute(
-                    "SELECT id,user_id,tipo,ip,cantidad,monto,estado,created_at,voucher_path,target_proxy_id,note, email "
-"FROM requests WHERE estado=? ORDER BY id DESC LIMIT 160",
+                    "SELECT id,user_id,tipo,ip,cantidad,monto,estado,created_at,voucher_path,target_proxy_id,note,"
+                    " COALESCE(email,'') AS email "
+                    "FROM requests WHERE estado=? ORDER BY id DESC LIMIT 160",
                     (state,),
                 )
             else:
                 cur.execute(
-                    "SELECT id,user_id,tipo,ip,cantidad,monto,estado,created_at,voucher_path,target_proxy_id,note "
+                    "SELECT id,user_id,tipo,ip,cantidad,monto,estado,created_at,voucher_path,target_proxy_id,note,"
+                    " COALESCE(email,'') AS email "
                     "FROM requests ORDER BY id DESC LIMIT 160"
                 )
             rows = cur.fetchall()
@@ -1629,7 +1581,6 @@ def admin_orders(admin=Depends(require_admin), state: str = ""):
         if tipo == "renew" and int(r["target_proxy_id"] or 0) > 0:
             extra = f" • Proxy #{int(r['target_proxy_id'])}"
 
-        # ✅ ESTA PARTE ES LA QUE TE ESTABA ROMPIENDO
         deliver_box = f"""
   <div style="margin-top:8px; max-width:520px;">
     <label class="muted">Pega aquí {qty} proxies (RAW) — 1 por línea</label>
@@ -1701,6 +1652,7 @@ def _deliver_buy_only_count(qty: int) -> bool:
     set_setting("stock_available", str(stock - qty))
     return True
 
+
 def _deliver_buy_add_proxies(conn: sqlite3.Connection, user_id: int, raw_text: str, qty: int, dias: int):
     lines = [ln.strip() for ln in (raw_text or "").splitlines()]
     items = []
@@ -1730,10 +1682,11 @@ def _deliver_buy_add_proxies(conn: sqlite3.Connection, user_id: int, raw_text: s
     if len(items) < qty:
         raise HTTPException(400, f"Pegaste {len(items)} proxies pero el pedido es de {qty}.")
 
-    start = day_floor(datetime.now())         # 00:00:00 hoy
-    vdt = start + timedelta(days=dias)        # 00:00:00 + dias
-    cur = conn.cursor()
+    # ✅ vence exacto sin horas extras: siempre desde 00:00 del día actual
+    start = day_floor(datetime.now())
+    vdt = start + timedelta(days=dias)
 
+    cur = conn.cursor()
     for raw in items[:qty]:
         first = raw.splitlines()[-1].strip()
         ip = first.replace("http://", "").replace("https://", "").split()[0]
@@ -1744,18 +1697,23 @@ def _deliver_buy_add_proxies(conn: sqlite3.Connection, user_id: int, raw_text: s
         )
 
 
-
 def _deliver_renew_extend(conn: sqlite3.Connection, user_id: int, proxy_id: int, dias: int):
     cur = conn.cursor()
     cur.execute("SELECT id, vence FROM proxies WHERE id=? AND user_id=?", (int(proxy_id), int(user_id)))
     p = cur.fetchone()
     if not p:
         raise HTTPException(400, "No encontré ese proxy para renovar.")
-        now = datetime.now()
+
+    # ✅ FIX: now fuera del if
+    now = datetime.now()
+
     v_old = parse_dt(p["vence"] or "") or now
     base_dt = v_old if v_old > now else now
+
+    # ✅ vence exacto: siempre 00:00 del día base
     base = day_floor(base_dt)
     v_new = base + timedelta(days=dias)
+
     cur.execute("UPDATE proxies SET vence=? WHERE id=?", (fmt_dt(v_new), int(proxy_id)))
 
 
@@ -1773,10 +1731,11 @@ def _deliver_claim_add_proxy(conn: sqlite3.Connection, user_id: int, note: str):
         raise HTTPException(400, "La solicitud no tiene proxy válido.")
 
     if not ip and raw:
-        first = raw.splitlines()[0].strip() if raw else ""
+        first = raw.splitlines()[-1].strip() if raw else ""
         ip = first.replace("http://", "").replace("https://", "").split()[0]
 
-        start = day_floor(datetime.now())
+    start = day_floor(datetime.now())
+
     dias = int(float(get_setting("dias_proxy", "30") or 30))
     if dias <= 0:
         dias = 30
@@ -1784,9 +1743,10 @@ def _deliver_claim_add_proxy(conn: sqlite3.Connection, user_id: int, note: str):
         dias = 30
 
     if vence:
-        vdt = parse_dt(vence) or (start + timedelta(days=dias))
+        parsed = parse_dt(vence) or (start + timedelta(days=dias))
+        vdt = day_floor(parsed)  # ✅ sin horas extras
     else:
-        vdt =     start = day_floor(datetime.now())
+        vdt = start + timedelta(days=dias)
 
     cur = conn.cursor()
     cur.execute(
@@ -2027,6 +1987,7 @@ def client_signup_page():
     """
     return page("Cliente • Crear cuenta", body, subtitle="Registro seguro")
 
+
 @app.post("/client/verify", response_class=HTMLResponse)
 def client_verify(phone: str = Form(...), pin: str = Form(...)):
     phone = _normalize_phone(phone)
@@ -2083,9 +2044,8 @@ def client_verify(phone: str = Form(...), pin: str = Form(...)):
     if status == "expired":
         return nice_error_page("PIN expirado", "El PIN venció. Crea tu cuenta de nuevo.", "/client/signup", "✨ Crear cuenta")
     if status == "bad":
-        return nice_error_page("PIN incorrecto", f"PIN incorrecto. Intentos: {extra}/3", "/client/signup", "↩️ Volver")
+        return nice_error_page("PIN incorrecto", f"PIN incorrecto. Intentos: {extra}/3", "/client/login", "↩️ Volver")
 
-        # status == "ok"
     def _get_uid_email():
         conn = db_conn()
         cur = conn.cursor()
@@ -2100,7 +2060,6 @@ def client_verify(phone: str = Form(...), pin: str = Form(...)):
 
     if uid:
         notify_user(uid, f"🎉 Bienvenido a {APP_TITLE}. Tu cuenta ya está verificada.")
-        # email opcional
         if uemail:
             try:
                 send_email(
@@ -2174,10 +2133,8 @@ def account_verify_login(phone: str, password: str) -> Optional[int]:
 
 @app.post("/client/login")
 def client_login(phone: str = Form(...), password: str = Form(...)):
-    # 1) intento de login normal (solo si verified=1)
     uid = account_verify_login(phone, password)
 
-    # 2) si no pudo loguear, verificar si existe pero NO verificada
     if not uid:
         pnorm = _normalize_phone(phone)
 
@@ -2189,6 +2146,7 @@ def client_login(phone: str = Form(...), password: str = Form(...)):
             conn.close()
             return (int(r["verified"] or 0) == 0) if r else False
 
+        # ✅ FIX: si está sin verificar, mostramos campo para poner PIN (no se pierde la cuenta)
         if _retry_sqlite(_check_unverified):
             body = f"""
             <div class="card">
@@ -2196,10 +2154,22 @@ def client_login(phone: str = Form(...), password: str = Form(...)):
               <p class="muted">Tu cuenta existe pero falta confirmar el PIN.</p>
               <div class="hr"></div>
 
-              <form method="post" action="/client/resend_pin">
+              <div class="row">
+                <form method="post" action="/client/resend_pin">
+                  <input type="hidden" name="phone" value="{html_escape(pnorm)}"/>
+                  <button class="btn" type="submit">📩 Reenviar PIN</button>
+                </form>
+                <a class="btn ghost" href="/client/signup">✨ Crear de nuevo</a>
+              </div>
+
+              <div class="hr"></div>
+
+              <form method="post" action="/client/verify">
                 <input type="hidden" name="phone" value="{html_escape(pnorm)}"/>
-                <button class="btn" type="submit">📩 Reenviar PIN</button>
-                <a class="btn ghost" href="/client/signup" style="margin-left:10px;">✨ Crear de nuevo</a>
+                <label class="muted">Escribe el PIN</label>
+                <input name="pin" placeholder="123456"/>
+                <div style="height:12px;"></div>
+                <button class="btn" type="submit">✅ Verificar</button>
               </form>
             </div>
             """
@@ -2212,7 +2182,6 @@ def client_login(phone: str = Form(...), password: str = Form(...)):
             "↩️ Intentar de nuevo",
         )
 
-    # ✅ actualizar last_seen / updated_at
     def _touch():
         conn = db_conn()
         cur = conn.cursor()
@@ -2235,6 +2204,7 @@ def client_login(phone: str = Form(...), password: str = Form(...)):
         samesite=COOKIE_SAMESITE,
     )
     return resp
+
 
 @app.post("/client/resend_pin", response_class=HTMLResponse)
 def client_resend_pin(phone: str = Form(...)):
@@ -2285,6 +2255,7 @@ def client_resend_pin(phone: str = Form(...)):
     </div>
     """
     return page("Verificación", body, subtitle="Reenviar PIN")
+
 
 @app.get("/logout")
 def client_logout():
@@ -2365,6 +2336,7 @@ def client_reset_submit(phone: str = Form(...), recovery_pin: str = Form(...), n
 
     return nice_error_page("Contraseña actualizada", "Ya puedes iniciar sesión con tu nueva contraseña.", "/client/login", "🔐 Iniciar sesión")
 
+
 # =========================
 # CLIENT PANEL: /me (SINGLE, FIXED)
 # =========================
@@ -2381,7 +2353,6 @@ def client_me(client=Depends(require_client)):
         conn = db_conn()
         cur = conn.cursor()
 
-        # (MEJORA) guardar last_seen si la columna existe (no rompe si no existe)
         try:
             cur.execute("UPDATE accounts SET last_seen=?, updated_at=? WHERE id=?", (now_str(), now_str(), uid))
             conn.commit()
@@ -2504,8 +2475,6 @@ def client_me(client=Depends(require_client)):
     <script>
       function pad(n){{return String(n).padStart(2,'0');}}
 
-      // (FIX) Parse robusto: la fecha viene como "YYYY-MM-DD HH:MM:SS"
-      // La interpretamos como hora LOCAL del servidor/cliente (consistente).
       function parseExp(s){{
         if(!s) return NaN;
         const parts = s.trim().split(' ');
@@ -2539,10 +2508,22 @@ def client_me(client=Depends(require_client)):
     """
     return page("Cliente", body, subtitle="Tus proxies y pedidos")
 
-
 # =========================
 # CLIENT: BANK / PROXIES / NOTIFICATIONS
 # =========================
+
+def ensure_accounts_role_schema():
+    """Asegura columna role en accounts."""
+    def _do():
+        conn = db_conn()
+        try:
+            _ensure_column(conn, "accounts", "role", "TEXT NOT NULL DEFAULT 'client'")
+        except Exception:
+            pass
+        conn.close()
+    _retry_sqlite(_do)
+
+
 @app.get("/bank", response_class=HTMLResponse)
 def client_bank(client=Depends(require_client)):
     title = get_setting("bank_title", "Cuenta bancaria")
@@ -2553,6 +2534,7 @@ def client_bank(client=Depends(require_client)):
       <div class="row">
         <a class="btn ghost" href="/me">⬅️ Volver</a>
         <a class="btn" href="/buy">🛒 Comprar</a>
+        <a class="btn ghost" href="/chat" style="margin-left:auto;">💬 Chat</a>
       </div>
       <div class="hr"></div>
       <div class="kpi">🏦 {html_escape(title)}</div>
@@ -2597,7 +2579,7 @@ def client_proxies(client=Depends(require_client)):
           <div><b>{html_escape(r['ip'] or '')}</b></div>
           <div class="muted">Inicio: {html_escape(r['inicio'] or '')} • Vence: {html_escape(r['vence'] or '')}</div>
           <div style="height:10px;"></div>
-          <pre>{html_escape(proxy_text)}</pre>
+          <pre style="max-width:100%; overflow:auto; word-break:break-word;">{html_escape(proxy_text)}</pre>
           <div class="row">
             <a class="btn ghost" href="/renew?proxy_id={int(r['id'])}">♻️ Renovar</a>
           </div>
@@ -2611,6 +2593,7 @@ def client_proxies(client=Depends(require_client)):
     <div class="card">
       <div class="row">
         <a class="btn ghost" href="/me">⬅️ Volver</a>
+        <a class="btn ghost" href="/chat" style="margin-left:auto;">💬 Chat</a>
       </div>
       <div class="hr"></div>
       <div class="kpi">📦 Mis proxies</div>
@@ -2648,14 +2631,13 @@ def client_notifications(client=Depends(require_client)):
         cards += f"""
         <div class="card" style="margin-bottom:12px;">
           <div class="muted">{badge} • {html_escape(n['created_at'] or '')}</div>
-          <pre>{html_escape(n['message'] or '')}</pre>
+          <pre style="max-width:100%; overflow:auto; word-break:break-word;">{html_escape(n['message'] or '')}</pre>
         </div>
         """
 
     if not cards:
         cards = "<div class='card'><p class='muted'>No tienes notificaciones.</p></div>"
 
-    # marcar visto automáticamente al abrir (si hay)
     if unseen_ids:
         def _mark():
             conn = db_conn()
@@ -2669,6 +2651,7 @@ def client_notifications(client=Depends(require_client)):
     <div class="card">
       <div class="row">
         <a class="btn ghost" href="/me">⬅️ Volver</a>
+        <a class="btn ghost" href="/chat" style="margin-left:auto;">💬 Chat</a>
       </div>
       <div class="hr"></div>
       <div class="kpi">🔔 Notificaciones</div>
@@ -2680,7 +2663,7 @@ def client_notifications(client=Depends(require_client)):
 
 
 # =========================
-# BUY / RENEW / PAY / VOUCHER  ✅ FIX /buy
+# BUY / RENEW / PAY / VOUCHER
 # =========================
 
 def ensure_requests_schema():
@@ -2691,7 +2674,6 @@ def ensure_requests_schema():
     def _do():
         conn = db_conn()
 
-        # Crear tabla si no existe (estructura completa usada por el panel)
         _ensure_table(
             conn,
             """
@@ -2714,7 +2696,6 @@ def ensure_requests_schema():
             """
         )
 
-        # Migraciones seguras por si la tabla existe pero vieja
         for col, coldef in [
             ("voucher_path", "TEXT NOT NULL DEFAULT ''"),
             ("voucher_uploaded_at", "TEXT NOT NULL DEFAULT ''"),
@@ -2735,7 +2716,6 @@ def ensure_requests_schema():
 
 @app.get("/buy", response_class=HTMLResponse)
 def client_buy_page(client=Depends(require_client)):
-    # ✅ asegurar schema para que /buy nunca reviente
     ensure_requests_schema()
 
     p1 = int(float(get_setting("precio_primera", "1500") or 1500))
@@ -2747,6 +2727,7 @@ def client_buy_page(client=Depends(require_client)):
       <div class="row">
         <a class="btn ghost" href="/me">⬅️ Volver</a>
         <a class="btn ghost" href="/bank">🏦 Ver cuenta</a>
+        <a class="btn ghost" href="/chat" style="margin-left:auto;">💬 Chat</a>
       </div>
       <div class="hr"></div>
 
@@ -2792,13 +2773,11 @@ def client_buy_submit(
     email: str = Form(""),
     client=Depends(require_client),
 ):
-    # ✅ asegurar schema para que el INSERT nunca reviente
     ensure_requests_schema()
 
     uid = int(client["uid"])
     email = (email or "").strip()
 
-    # qty
     try:
         qty = int(float((cantidad or "1").strip()))
     except Exception:
@@ -2809,7 +2788,6 @@ def client_buy_submit(
     if qty > 50:
         qty = 50
 
-    # precios
     p1 = int(float(get_setting("precio_primera", "1500") or 1500))
     currency = get_setting("currency", "DOP")
 
@@ -2826,8 +2804,6 @@ def client_buy_submit(
     def _do():
         conn = db_conn()
         cur = conn.cursor()
-
-        # ✅ Pedido en requests
         cur.execute(
             "INSERT INTO requests(user_id,tipo,ip,cantidad,monto,estado,created_at,email,currency,target_proxy_id,note) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -2841,16 +2817,17 @@ def client_buy_submit(
     try:
         rid = _retry_sqlite(_do)
     except Exception:
-        # si algo raro pasa, damos error bonito (no 500 crudo)
         return nice_error_page("Error", "No se pudo crear el pedido. Intenta de nuevo.", "/buy", "↩️ Volver")
 
     notify_user(uid, f"🧾 Pedido #{rid} creado por {qty} proxy(s). Sube tu voucher para continuar.")
     admin_log("order_created_buy", json.dumps({"rid": rid, "uid": uid, "qty": qty, "monto": monto}, ensure_ascii=False))
-
     return RedirectResponse(url=f"/order/{int(rid)}/pay", status_code=302)
+
 
 @app.get("/renew", response_class=HTMLResponse)
 def client_renew_page(client=Depends(require_client), proxy_id: str = ""):
+    ensure_requests_schema()
+
     pr = int(float(get_setting("precio_renovacion", "1000") or 1000))
     currency = get_setting("currency", "DOP")
     bank = get_setting("bank_details", "")
@@ -2879,6 +2856,7 @@ def client_renew_page(client=Depends(require_client), proxy_id: str = ""):
       <div class="row">
         <a class="btn ghost" href="/me">⬅️ Volver</a>
         <a class="btn ghost" href="/bank">🏦 Ver cuenta</a>
+        <a class="btn ghost" href="/chat" style="margin-left:auto;">💬 Chat</a>
       </div>
       <div class="hr"></div>
       <div class="kpi">♻️ Renovar proxy</div>
@@ -2916,6 +2894,8 @@ def client_renew_page(client=Depends(require_client), proxy_id: str = ""):
 
 @app.post("/renew")
 def client_renew_submit(proxy_id: str = Form(...), email: str = Form(""), note: str = Form(""), client=Depends(require_client)):
+    ensure_requests_schema()
+
     uid = int(client["uid"])
     email = (email or "").strip()
     note = (note or "").strip()
@@ -2957,6 +2937,8 @@ def client_renew_submit(proxy_id: str = Form(...), email: str = Form(""), note: 
 
 @app.get("/order/{rid}/pay", response_class=HTMLResponse)
 def client_order_pay(rid: int, client=Depends(require_client)):
+    ensure_requests_schema()
+
     uid = int(client["uid"])
     bank = get_setting("bank_details", "")
     title = get_setting("bank_title", "Cuenta bancaria")
@@ -2988,6 +2970,7 @@ def client_order_pay(rid: int, client=Depends(require_client)):
     <div class="card">
       <div class="row">
         <a class="btn ghost" href="/me">⬅️ Volver</a>
+        <a class="btn ghost" href="/chat" style="margin-left:auto;">💬 Chat</a>
       </div>
       <div class="hr"></div>
 
@@ -3022,6 +3005,8 @@ def client_order_pay(rid: int, client=Depends(require_client)):
 
 @app.post("/order/{rid}/voucher", response_class=HTMLResponse)
 def client_order_voucher(rid: int, file: UploadFile = File(...), client=Depends(require_client)):
+    ensure_requests_schema()
+
     uid = int(client["uid"])
 
     if not file or not file.filename:
@@ -3039,7 +3024,6 @@ def client_order_voucher(rid: int, file: UploadFile = File(...), client=Depends(
     if not r or int(r["user_id"]) != uid:
         raise HTTPException(404, "Pedido no encontrado.")
 
-    # (MEJORA) solo permitir subir voucher en estados correctos
     estado = (r["estado"] or "").strip()
     if estado not in ("awaiting_voucher", "voucher_received"):
         return nice_error_page("No permitido", f"Este pedido está en estado '{estado}' y no admite voucher.", f"/order/{rid}/pay", "↩️ Volver")
@@ -3084,10 +3068,13 @@ def client_order_voucher(rid: int, file: UploadFile = File(...), client=Depends(
 # =========================
 @app.get("/add-existing", response_class=HTMLResponse)
 def client_add_existing_page(client=Depends(require_client)):
+    ensure_requests_schema()
+
     body = """
     <div class="card">
       <div class="row">
         <a class="btn ghost" href="/me">⬅️ Volver</a>
+        <a class="btn ghost" href="/chat" style="margin-left:auto;">💬 Chat</a>
       </div>
       <div class="hr"></div>
 
@@ -3118,6 +3105,8 @@ def client_add_existing_page(client=Depends(require_client)):
 
 @app.post("/add-existing", response_class=HTMLResponse)
 def client_add_existing_submit(ip: str = Form(""), raw: str = Form(""), vence: str = Form(""), client=Depends(require_client)):
+    ensure_requests_schema()
+
     uid = int(client["uid"])
     ip = (ip or "").strip()
     raw = (raw or "").strip()
@@ -3149,7 +3138,463 @@ def client_add_existing_submit(ip: str = Form(""), raw: str = Form(""), vence: s
 
 
 # =========================
-# SUPPORT (TICKETS) — NO "detail no autorizado"
+# LIVE CHAT (polling)
+# =========================
+
+def ensure_chat_schema():
+    def _do():
+        conn = db_conn()
+        _ensure_table(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS chat_messages(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                sender TEXT NOT NULL DEFAULT 'user', -- 'user' o 'admin'
+                message TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        conn.close()
+    _retry_sqlite(_do)
+
+
+@app.get("/chat", response_class=HTMLResponse)
+def client_chat_page(client=Depends(require_client)):
+    ensure_chat_schema()
+    uid = int(client["uid"])
+
+    body = f"""
+    <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/me">⬅️ Volver</a>
+      </div>
+      <div class="hr"></div>
+      <div class="kpi">💬 Chat en vivo</div>
+      <p class="muted">Escribe aquí y un admin te responde.</p>
+    </div>
+
+    <div class="card" style="padding:0; overflow:hidden;">
+      <div id="chatBox" style="max-height:420px; overflow:auto; padding:14px;"></div>
+      <div style="border-top:1px solid rgba(255,255,255,.10); padding:14px;">
+        <form id="chatForm" method="post" action="/chat/send">
+          <input type="text" name="message" id="msg" placeholder="Escribe tu mensaje..." />
+          <div style="height:10px;"></div>
+          <button class="btn" type="submit">📨 Enviar</button>
+        </form>
+      </div>
+    </div>
+
+    <script>
+      function esc(s) {{
+        return (s||"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+      }}
+
+      async function loadChat() {{
+        try {{
+          const r = await fetch("/api/chat");
+          const data = await r.json();
+          const box = document.getElementById("chatBox");
+          box.innerHTML = data.items.map(it => {{
+            const who = it.sender === "admin" ? "🛡️ Admin" : "👤 Tú";
+            const cls = it.sender === "admin" ? "rgba(0,212,255,.14)" : "rgba(196,0,255,.14)";
+            return `
+              <div style="margin-bottom:10px; padding:10px 12px; border-radius:14px; border:1px solid rgba(255,255,255,.10); background:${{cls}};">
+                <div class="muted" style="font-size:12px;">${{who}} • ${{esc(it.created_at)}}</div>
+                <div style="word-break:break-word;">${{esc(it.message)}}</div>
+              </div>`;
+          }}).join("");
+          box.scrollTop = box.scrollHeight;
+        }} catch(e) {{}}
+      }}
+
+      document.getElementById("chatForm").addEventListener("submit", async (ev) => {{
+        ev.preventDefault();
+        const inp = document.getElementById("msg");
+        const msg = (inp.value||"").trim();
+        if(!msg) return;
+        inp.value = "";
+        const fd = new FormData();
+        fd.append("message", msg);
+        await fetch("/chat/send", {{method:"POST", body:fd}});
+        loadChat();
+      }});
+
+      loadChat();
+      setInterval(loadChat, 2000);
+    </script>
+    """
+    return page("Chat", body, subtitle=f"Cliente #{uid}")
+
+
+@app.post("/chat/send")
+def client_chat_send(message: str = Form(""), client=Depends(require_client)):
+    ensure_chat_schema()
+    uid = int(client["uid"])
+    msg = (message or "").strip()
+    if not msg:
+        return RedirectResponse(url="/chat", status_code=302)
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO chat_messages(user_id,sender,message,created_at) VALUES(?,?,?,?)",
+            (uid, "user", msg, now_str()),
+        )
+        conn.commit()
+        conn.close()
+
+    _retry_sqlite(_do)
+    outbox_add("chat_user", json.dumps({"user_id": uid, "message": msg}, ensure_ascii=False))
+    return RedirectResponse(url="/chat", status_code=302)
+
+
+@app.get("/api/chat")
+def api_chat(client=Depends(require_client)):
+    ensure_chat_schema()
+    uid = int(client["uid"])
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, sender, message, created_at FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 120",
+            (uid,),
+        )
+        rows = [dict(r) for r in cur.fetchall()][::-1]
+        conn.close()
+        return rows
+
+    return {"items": _retry_sqlite(_do)}
+
+
+@app.get("/admin/chats", response_class=HTMLResponse)
+def admin_chats(admin=Depends(require_admin)):
+    ensure_chat_schema()
+    ensure_accounts_role_schema()
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT a.id AS user_id, a.phone, COALESCE(a.email,'') AS email,
+                   (SELECT message FROM chat_messages cm WHERE cm.user_id=a.id ORDER BY cm.id DESC LIMIT 1) AS last_msg,
+                   (SELECT created_at FROM chat_messages cm WHERE cm.user_id=a.id ORDER BY cm.id DESC LIMIT 1) AS last_at
+            FROM accounts a
+            WHERE EXISTS (SELECT 1 FROM chat_messages cm WHERE cm.user_id=a.id)
+            ORDER BY COALESCE(last_at,'') DESC
+            LIMIT 200
+            """
+        )
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+
+    rows = _retry_sqlite(_do)
+
+    trs = ""
+    for r in rows:
+        uid = int(r["user_id"])
+        trs += (
+            "<tr>"
+            f"<td><a class='btn ghost' href='/admin/chat/{uid}'>💬 Chat</a></td>"
+            f"<td><code>{uid}</code></td>"
+            f"<td>{html_escape(r['phone'] or '')}</td>"
+            f"<td>{html_escape(r['email'] or '')}</td>"
+            f"<td style='max-width:420px; overflow:auto; word-break:break-word;'>{html_escape((r['last_msg'] or '')[:400])}</td>"
+            f"<td>{html_escape(r['last_at'] or '')}</td>"
+            "</tr>"
+        )
+
+    body = f"""
+    <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
+      </div>
+      <div class="hr"></div>
+      <div class="kpi">💬 Chats</div>
+      <p class="muted">Conversaciones con usuarios.</p>
+    </div>
+
+    <div class="card">
+      <table>
+        <tr><th></th><th>User</th><th>Teléfono</th><th>Email</th><th>Último mensaje</th><th>Fecha</th></tr>
+        {trs or "<tr><td colspan='6' class='muted'>No hay chats aún.</td></tr>"}
+      </table>
+    </div>
+    """
+    return page("Admin • Chats", body, subtitle="Live Chat")
+
+
+@app.get("/admin/chat/{user_id}", response_class=HTMLResponse)
+def admin_chat_detail(user_id: int, admin=Depends(require_admin)):
+    ensure_chat_schema()
+    ensure_accounts_role_schema()
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT id, phone, COALESCE(email,'') AS email FROM accounts WHERE id=?", (int(user_id),))
+        u = cur.fetchone()
+        cur.execute(
+            "SELECT id, sender, message, created_at FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 200",
+            (int(user_id),),
+        )
+        msgs = [dict(r) for r in cur.fetchall()][::-1]
+        conn.close()
+        return u, msgs
+
+    u, msgs = _retry_sqlite(_do)
+    if not u:
+        return nice_error_page("Chat", "Usuario no encontrado.", "/admin/chats", "⬅️ Volver")
+
+    items = ""
+    for it in msgs:
+        who = "🛡️ Admin" if it["sender"] == "admin" else "👤 Cliente"
+        bg = "rgba(0,212,255,.14)" if it["sender"] == "admin" else "rgba(196,0,255,.14)"
+        items += f"""
+        <div style="margin-bottom:10px; padding:10px 12px; border-radius:14px; border:1px solid rgba(255,255,255,.10); background:{bg};">
+          <div class="muted" style="font-size:12px;">{who} • {html_escape(it["created_at"] or "")}</div>
+          <div style="word-break:break-word;">{html_escape(it["message"] or "")}</div>
+        </div>
+        """
+
+    body = f"""
+    <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/admin/chats">⬅️ Chats</a>
+        <a class="btn ghost" href="/admin/user/{int(user_id)}">👤 Usuario</a>
+        <a class="btn ghost" href="/admin" style="margin-left:auto;">🏠 Dashboard</a>
+      </div>
+      <div class="hr"></div>
+      <div class="kpi">Chat con #{int(user_id)}</div>
+      <p class="muted">{html_escape(u["phone"] or "")} • {html_escape(u["email"] or "")}</p>
+    </div>
+
+    <div class="card" style="padding:0; overflow:hidden;">
+      <div style="max-height:420px; overflow:auto; padding:14px;">{items or "<div class='muted'>Sin mensajes aún.</div>"}</div>
+      <div style="border-top:1px solid rgba(255,255,255,.10); padding:14px;">
+        <form method="post" action="/admin/chat/{int(user_id)}/send">
+          <input name="message" placeholder="Responder..." />
+          <div style="height:10px;"></div>
+          <button class="btn" type="submit">📩 Enviar</button>
+        </form>
+      </div>
+    </div>
+    """
+    return page("Admin • Chat", body, subtitle="Responder")
+
+
+@app.post("/admin/chat/{user_id}/send")
+def admin_chat_send(user_id: int, message: str = Form(""), admin=Depends(require_admin)):
+    ensure_chat_schema()
+    msg = (message or "").strip()
+    if not msg:
+        return RedirectResponse(url=f"/admin/chat/{int(user_id)}", status_code=302)
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM accounts WHERE id=?", (int(user_id),))
+        if not cur.fetchone():
+            conn.close()
+            raise HTTPException(404, "Usuario no encontrado")
+
+        cur.execute(
+            "INSERT INTO chat_messages(user_id,sender,message,created_at) VALUES(?,?,?,?)",
+            (int(user_id), "admin", msg, now_str()),
+        )
+        conn.commit()
+        conn.close()
+
+    _retry_sqlite(_do)
+    notify_user(int(user_id), "💬 Tienes una respuesta del admin en el Chat.")
+    return RedirectResponse(url=f"/admin/chat/{int(user_id)}", status_code=302)
+
+
+# =========================
+# ADMIN: CREATE USER / SET ROLE / DELETE USER
+# =========================
+
+@app.get("/admin/users/create", response_class=HTMLResponse)
+def admin_create_user_page(admin=Depends(require_admin)):
+    ensure_accounts_role_schema()
+    body = """
+    <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/admin">⬅️ Dashboard</a>
+        <a class="btn ghost" href="/admin/accounts">👥 Usuarios</a>
+      </div>
+      <div class="hr"></div>
+      <div class="kpi">➕ Crear usuario</div>
+
+      <form method="post" action="/admin/users/create">
+        <label class="muted">Teléfono</label>
+        <input name="phone" placeholder="+1809..."/>
+        <div style="height:12px;"></div>
+
+        <label class="muted">Email (opcional)</label>
+        <input name="email" placeholder="tuemail@gmail.com"/>
+        <div style="height:12px;"></div>
+
+        <label class="muted">Contraseña</label>
+        <input name="password" type="password" placeholder="mín 6"/>
+        <div style="height:12px;"></div>
+
+        <label class="muted">Verificado</label>
+        <select name="verified">
+          <option value="1">Sí</option>
+          <option value="0">No</option>
+        </select>
+        <div style="height:12px;"></div>
+
+        <label class="muted">Role</label>
+        <select name="role">
+          <option value="client">client</option>
+          <option value="admin">admin</option>
+        </select>
+
+        <div style="height:12px;"></div>
+        <button class="btn" type="submit">✅ Crear</button>
+      </form>
+    </div>
+    """
+    return page("Admin • Crear usuario", body, subtitle="Usuarios")
+
+
+@app.post("/admin/users/create", response_class=HTMLResponse)
+def admin_create_user_submit(
+    phone: str = Form(...),
+    email: str = Form(""),
+    password: str = Form(...),
+    verified: str = Form("1"),
+    role: str = Form("client"),
+    admin=Depends(require_admin),
+):
+    ensure_accounts_role_schema()
+    phone_n = _normalize_phone(phone)
+    if not phone_n:
+        return nice_error_page("Dato inválido", "Teléfono inválido.", "/admin/users/create", "↩️ Volver")
+
+    role = (role or "client").strip().lower()
+    if role not in ("client", "admin"):
+        role = "client"
+
+    ver = 1 if str(verified).strip() == "1" else 0
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM accounts WHERE phone=?", (phone_n,))
+        if cur.fetchone():
+            conn.close()
+            raise HTTPException(400, "Ese teléfono ya existe.")
+
+        cur.execute(
+            "INSERT INTO accounts(phone,email,password_hash,recovery_pin_hash,verified,role,is_blocked,last_seen,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                phone_n,
+                (email or "").strip(),
+                password_make_hash(password),
+                "",
+                ver,
+                role,
+                0,
+                "",
+                now_str(),
+                now_str(),
+            ),
+        )
+        conn.commit()
+        uid = cur.lastrowid
+        conn.close()
+        return uid
+
+    try:
+        uid = _retry_sqlite(_do)
+    except HTTPException as e:
+        return nice_error_page("No se pudo crear", str(e.detail), "/admin/users/create", "↩️ Volver")
+
+    admin_log("admin_create_user", json.dumps({"uid": uid, "phone": phone_n, "role": role, "verified": ver}, ensure_ascii=False))
+    return nice_error_page("Listo", f"Usuario #{uid} creado.", f"/admin/user/{int(uid)}", "👤 Ver usuario")
+
+
+@app.post("/admin/user/{user_id}/set_role")
+def admin_set_user_role(user_id: int, role: str = Form("client"), admin=Depends(require_admin)):
+    ensure_accounts_role_schema()
+    role = (role or "client").strip().lower()
+    if role not in ("client", "admin"):
+        role = "client"
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM accounts WHERE id=?", (int(user_id),))
+        if not cur.fetchone():
+            conn.close()
+            raise HTTPException(404, "Usuario no encontrado")
+        cur.execute("UPDATE accounts SET role=?, updated_at=? WHERE id=?", (role, now_str(), int(user_id)))
+        conn.commit()
+        conn.close()
+
+    _retry_sqlite(_do)
+    admin_log("user_set_role", json.dumps({"user_id": user_id, "role": role}, ensure_ascii=False))
+    notify_user(int(user_id), f"🛡️ Tu rol fue actualizado a: {role}")
+    return RedirectResponse(url=f"/admin/user/{int(user_id)}", status_code=302)
+
+
+@app.post("/admin/user/{user_id}/delete")
+def admin_delete_user(user_id: int, admin=Depends(require_admin)):
+    """Borra usuario y datos relacionados."""
+    ensure_requests_schema()
+    ensure_chat_schema()
+    ensure_accounts_role_schema()
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM accounts WHERE id=?", (int(user_id),))
+        if not cur.fetchone():
+            conn.close()
+            raise HTTPException(404, "Usuario no encontrado")
+
+        # limpiar dependencias
+        try:
+            cur.execute("DELETE FROM proxies WHERE user_id=?", (int(user_id),))
+        except Exception:
+            pass
+        try:
+            cur.execute("DELETE FROM requests WHERE user_id=?", (int(user_id),))
+        except Exception:
+            pass
+        try:
+            cur.execute("DELETE FROM tickets WHERE user_id=?", (int(user_id),))
+        except Exception:
+            pass
+        try:
+            cur.execute("DELETE FROM notifications WHERE user_id=?", (int(user_id),))
+        except Exception:
+            pass
+        try:
+            cur.execute("DELETE FROM chat_messages WHERE user_id=?", (int(user_id),))
+        except Exception:
+            pass
+
+        cur.execute("DELETE FROM accounts WHERE id=?", (int(user_id),))
+        conn.commit()
+        conn.close()
+
+    _retry_sqlite(_do)
+    admin_log("user_delete", json.dumps({"user_id": int(user_id)}, ensure_ascii=False))
+    return RedirectResponse(url="/admin/accounts", status_code=302)
+
+
+# =========================
+# SUPPORT (TICKETS)
 # =========================
 @app.get("/support", response_class=HTMLResponse)
 def support_page(request: Request):
@@ -3180,7 +3625,7 @@ def support_page(request: Request):
         <div class="card" style="margin-bottom:12px;">
           <div class="muted">Ticket #{int(t['id'])} • {html_escape(t['created_at'] or '')} • {html_escape(t['status'] or '')}</div>
           <div><b>{html_escape(t['subject'] or 'Soporte')}</b></div>
-          <pre>{html_escape(t['message'] or '')}</pre>
+          <pre style="max-width:100%; overflow:auto; word-break:break-word;">{html_escape(t['message'] or '')}</pre>
           {reply_block}
         </div>
         """
@@ -3191,6 +3636,7 @@ def support_page(request: Request):
     <div class="card">
       <div class="row">
         <a class="btn ghost" href="/me">⬅️ Volver</a>
+        <a class="btn ghost" href="/chat" style="margin-left:auto;">💬 Chat</a>
       </div>
       <div class="hr"></div>
       <div class="kpi">💬 Soporte</div>
@@ -3273,8 +3719,3 @@ def api_outbox(admin=Depends(require_admin)):
 
     rows = _retry_sqlite(_do)
     return {"enabled": True, "items": rows}
-
-
-
-
-
