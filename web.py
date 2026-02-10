@@ -2723,13 +2723,64 @@ def client_notifications(client=Depends(require_client)):
 
 
 # =========================
-# BUY / RENEW / PAY / VOUCHER
+# BUY / RENEW / PAY / VOUCHER  ✅ FIX /buy
 # =========================
-# =========================
-# BUY / RENEW / PAY / VOUCHER
-# =========================
+
+def ensure_requests_schema():
+    """
+    ✅ FIX: /buy daba 500 cuando no existe la tabla requests o le faltan columnas.
+    Esto crea/migra 'requests' (y no rompe si ya existe).
+    """
+    def _do():
+        conn = db_conn()
+
+        # Crear tabla si no existe (estructura completa usada por el panel)
+        _ensure_table(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS requests(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                tipo TEXT NOT NULL DEFAULT '',
+                ip TEXT NOT NULL DEFAULT '-',
+                cantidad INTEGER NOT NULL DEFAULT 1,
+                monto INTEGER NOT NULL DEFAULT 0,
+                estado TEXT NOT NULL DEFAULT 'awaiting_voucher',
+                created_at TEXT NOT NULL DEFAULT '',
+                voucher_path TEXT NOT NULL DEFAULT '',
+                voucher_uploaded_at TEXT NOT NULL DEFAULT '',
+                email TEXT NOT NULL DEFAULT '',
+                currency TEXT NOT NULL DEFAULT 'DOP',
+                target_proxy_id INTEGER NOT NULL DEFAULT 0,
+                note TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+
+        # Migraciones seguras por si la tabla existe pero vieja
+        for col, coldef in [
+            ("voucher_path", "TEXT NOT NULL DEFAULT ''"),
+            ("voucher_uploaded_at", "TEXT NOT NULL DEFAULT ''"),
+            ("email", "TEXT NOT NULL DEFAULT ''"),
+            ("currency", "TEXT NOT NULL DEFAULT 'DOP'"),
+            ("target_proxy_id", "INTEGER NOT NULL DEFAULT 0"),
+            ("note", "TEXT NOT NULL DEFAULT ''"),
+        ]:
+            try:
+                _ensure_column(conn, "requests", col, coldef)
+            except Exception:
+                pass
+
+        conn.close()
+
+    _retry_sqlite(_do)
+
+
 @app.get("/buy", response_class=HTMLResponse)
 def client_buy_page(client=Depends(require_client)):
+    # ✅ asegurar schema para que /buy nunca reviente
+    ensure_requests_schema()
+
     p1 = int(float(get_setting("precio_primera", "1500") or 1500))
     currency = get_setting("currency", "DOP")
     bank = get_setting("bank_details", "")
@@ -2784,6 +2835,9 @@ def client_buy_submit(
     email: str = Form(""),
     client=Depends(require_client),
 ):
+    # ✅ asegurar schema para que el INSERT nunca reviente
+    ensure_requests_schema()
+
     uid = int(client["uid"])
     email = (email or "").strip()
 
@@ -2816,7 +2870,7 @@ def client_buy_submit(
         conn = db_conn()
         cur = conn.cursor()
 
-        # ✅ Creamos pedido en requests (NO en accounts)
+        # ✅ Pedido en requests
         cur.execute(
             "INSERT INTO requests(user_id,tipo,ip,cantidad,monto,estado,created_at,email,currency,target_proxy_id,note) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -2827,12 +2881,16 @@ def client_buy_submit(
         conn.close()
         return rid
 
-    rid = _retry_sqlite(_do)
+    try:
+        rid = _retry_sqlite(_do)
+    except Exception:
+        # si algo raro pasa, damos error bonito (no 500 crudo)
+        return nice_error_page("Error", "No se pudo crear el pedido. Intenta de nuevo.", "/buy", "↩️ Volver")
+
     notify_user(uid, f"🧾 Pedido #{rid} creado por {qty} proxy(s). Sube tu voucher para continuar.")
     admin_log("order_created_buy", json.dumps({"rid": rid, "uid": uid, "qty": qty, "monto": monto}, ensure_ascii=False))
 
     return RedirectResponse(url=f"/order/{int(rid)}/pay", status_code=302)
-
 
 @app.get("/renew", response_class=HTMLResponse)
 def client_renew_page(client=Depends(require_client), proxy_id: str = ""):
