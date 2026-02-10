@@ -436,7 +436,7 @@ def ensure_schema() -> str:
     ins("currency", "DOP")
     ins("stock_available", "0")
 
-    # accounts
+       # accounts
     _ensure_table(
         conn,
         """
@@ -446,32 +446,28 @@ def ensure_schema() -> str:
             password_hash TEXT NOT NULL,
             recovery_pin_hash TEXT NOT NULL DEFAULT '',
             verified INTEGER NOT NULL DEFAULT 0,
+            is_blocked INTEGER NOT NULL DEFAULT 0,
+            last_seen TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL DEFAULT ''
         );
         """,
     )
-    _ensure_column(conn, "accounts", "recovery_pin_hash", "TEXT NOT NULL DEFAULT ''")
 
-    # ✅ NUEVO: columnas para bloqueo y auditoría (compatibles con DB vieja)
-    try:
-        _ensure_column(conn, "accounts", "is_blocked", "INTEGER NOT NULL DEFAULT 0")
-    except Exception:
-        pass
-    try:
-        _ensure_column(conn, "accounts", "last_seen", "TEXT NOT NULL DEFAULT ''")
-    except Exception:
-        pass
+    # Migraciones seguras para DB vieja (solo agrega si faltan)
+    for col, coldef in [
+        ("recovery_pin_hash", "TEXT NOT NULL DEFAULT ''"),
+        ("verified", "INTEGER NOT NULL DEFAULT 0"),
+        ("is_blocked", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_seen", "TEXT NOT NULL DEFAULT ''"),
+        ("created_at", "TEXT NOT NULL DEFAULT ''"),
+        ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+    ]:
+        try:
+            _ensure_column(conn, "accounts", col, coldef)
+        except Exception:
+            pass
 
-# accounts (asegurar columnas aunque la DB sea vieja)
-_ensure_column(conn, "accounts", "phone", "TEXT UNIQUE")
-_ensure_column(conn, "accounts", "password_hash", "TEXT NOT NULL DEFAULT ''")
-_ensure_column(conn, "accounts", "recovery_pin_hash", "TEXT NOT NULL DEFAULT ''")
-_ensure_column(conn, "accounts", "verified", "INTEGER NOT NULL DEFAULT 0")
-_ensure_column(conn, "accounts", "created_at", "TEXT NOT NULL DEFAULT ''")
-_ensure_column(conn, "accounts", "updated_at", "TEXT NOT NULL DEFAULT ''")
-_ensure_column(conn, "accounts", "is_blocked", "INTEGER NOT NULL DEFAULT 0")
-_ensure_column(conn, "accounts", "last_seen", "TEXT NOT NULL DEFAULT ''")
 
     # signup_pins
     _ensure_table(
@@ -3054,4 +3050,5 @@ def api_outbox(admin=Depends(require_admin)):
 
     rows = _retry_sqlite(_do)
     return {"enabled": True, "items": rows}
+
 
