@@ -1564,7 +1564,8 @@ def admin_orders(admin=Depends(require_admin), state: str = ""):
         if tipo == "renew" and int(r["target_proxy_id"] or 0) > 0:
             extra = f" • Proxy #{int(r['target_proxy_id'])}"
 
-                deliver_box = ""
+        # ✅ ESTA PARTE ES LA QUE TE ESTABA ROMPIENDO
+        deliver_box = ""
         if tipo == "buy":
             deliver_box = f"""
               <div style="margin-top:8px;">
@@ -1579,7 +1580,6 @@ def admin_orders(admin=Depends(require_admin), state: str = ""):
             <button class="btn" type="submit" style="margin-top:8px;">✅ Aprobar</button>
           </form>
         """
-
         reject_form = f"""
           <form method="post" action="/admin/order/{rid}/reject" style="display:inline; margin-left:8px;">
             <button class="btn bad" type="submit">❌ Rechazar</button>
