@@ -31,9 +31,9 @@ from email.message import EmailMessage
 
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "").strip()   # tu gmail
-SMTP_PASS = os.getenv("SMTP_PASS", "").strip()   # app password (NO tu clave normal)
-SMTP_FROM = os.getenv("SMTP_FROM", "").strip() or SMTP_USER
+SMTP_USER = os.getenv("santiagowarmi8@gmail.com", "").strip()   # tu gmail
+SMTP_PASS = os.getenv("itoe hmvu jqqt rcyo", "").strip()   # app password (itoe hmvu jqqt rcyo)
+SMTP_FROM = os.getenv("santiagowarmi8@gmail.com", "").strip() or SMTP_USER
 
 
 def send_email(to_email: str, subject: str, body: str):
