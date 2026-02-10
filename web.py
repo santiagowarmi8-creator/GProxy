@@ -1415,7 +1415,6 @@ def admin_user_toggle_block(user_id: int, admin=Depends(require_admin)):
     admin_log("user_toggle_block", json.dumps({"user_id": user_id, "is_blocked": newv}, ensure_ascii=False))
     return RedirectResponse(url=f"/admin/user/{int(user_id)}", status_code=302)
 
-<p class="muted">{html_escape(u['phone'] or '')} • {html_escape(u['email'] or '')} • {tag}</p>
 
 @app.get("/admin/user/{user_id}", response_class=HTMLResponse)
 def admin_user_detail(user_id: int, admin=Depends(require_admin)):
@@ -1423,11 +1422,12 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
         conn = db_conn()
         cur = conn.cursor()
 
+        # ✅ OJO: Traemos email con COALESCE para no romper si está vacío
         cur.execute(
             """
-	    SELECT id, phone, email, verified, ...
-
-            SELECT id, phone, verified,
+            SELECT id, phone,
+                   COALESCE(email,'') AS email,
+                   verified,
                    COALESCE(is_blocked,0) AS is_blocked,
                    COALESCE(last_seen,'') AS last_seen,
                    created_at, updated_at
@@ -1440,7 +1440,10 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
 
         proxies_rows = []
         try:
-            cur.execute("SELECT id, ip, vence, estado FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 50", (int(user_id),))
+            cur.execute(
+                "SELECT id, ip, vence, estado FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 50",
+                (int(user_id),),
+            )
             proxies_rows = cur.fetchall()
         except Exception:
             proxies_rows = []
@@ -1467,34 +1470,28 @@ def admin_user_detail(user_id: int, admin=Depends(require_admin)):
     blocked = int(u["is_blocked"] or 0)
     tag = "🚫 BLOQUEADO" if blocked == 1 else "✅ ACTIVO"
 
+    # ✅ Tabla de proxies (incluye botón eliminar)
     phtml = ""
     for r in proxies_rows:
+        pid = int(r["id"])
         phtml += (
             "<tr>"
-            f"<td>{int(r['id'])}</td>"
+            f"<td>{pid}</td>"
             f"<td>{html_escape(r['ip'] or '')}</td>"
             f"<td>{html_escape(r['vence'] or '')}</td>"
             f"<td>{html_escape(r['estado'] or '')}</td>"
+            f"<td>"
+            f"  <form method='post' action='/admin/proxy/{pid}/delete' "
+            f"        onsubmit=\"return confirm('Eliminar proxy #{pid}?')\">"
+            f"    <button class='btn bad' type='submit'>🗑 Eliminar</button>"
+            f"  </form>"
+            f"</td>"
             "</tr>"
         )
     if not phtml:
-        phtml = "<tr><td colspan='4' class='muted'>Sin proxies</td></tr>"
-<tr><th>PID</th><th>IP</th><th>Vence</th><th>Estado</th><th>Acciones</th></tr>
-phtml += (
-    "<tr>"
-    f"<td>{int(r['id'])}</td>"
-    f"<td>{html_escape(r['ip'] or '')}</td>"
-    f"<td>{html_escape(r['vence'] or '')}</td>"
-    f"<td>{html_escape(r['estado'] or '')}</td>"
-    f"<td>"
-    f"  <form method='post' action='/admin/proxy/{int(r['id'])}/delete' "
-    f"        onsubmit=\"return confirm('Eliminar proxy #{int(r['id'])}?')\">"
-    f"    <button class='btn bad' type='submit'>🗑 Eliminar</button>"
-    f"  </form>"
-    f"</td>"
-    "</tr>"
-)
+        phtml = "<tr><td colspan='5' class='muted'>Sin proxies</td></tr>"
 
+    # ✅ Tabla de pedidos
     ohtml = ""
     for r in req_rows:
         voucher = (r["voucher_path"] or "").strip()
@@ -1536,14 +1533,17 @@ phtml += (
       <div class="hr"></div>
       <div class="muted">Usuario</div>
       <div class="kpi">{int(user_id)}</div>
-      <p class="muted">{html_escape(u['phone'] or '')} • {tag}</p>
+
+      <!-- ✅ AQUÍ ES DONDE VA EL “•” (DENTRO DEL STRING) -->
+      <p class="muted">{html_escape(u['phone'] or '')} • {html_escape(u['email'] or '')} • {tag}</p>
+
       <p class="muted">Última vez: {html_escape(u['last_seen'] or '-')}</p>
     </div>
 
     <div class="card">
       <h3 style="margin:0 0 10px 0;">📦 Proxies</h3>
       <table>
-        <tr><th>PID</th><th>IP</th><th>Vence</th><th>Estado</th></tr>
+        <tr><th>PID</th><th>IP</th><th>Vence</th><th>Estado</th><th>Acciones</th></tr>
         {phtml}
       </table>
     </div>
@@ -2725,14 +2725,15 @@ def client_notifications(client=Depends(require_client)):
 # =========================
 # BUY / RENEW / PAY / VOUCHER
 # =========================
+# =========================
+# BUY / RENEW / PAY / VOUCHER
+# =========================
 @app.get("/buy", response_class=HTMLResponse)
 def client_buy_page(client=Depends(require_client)):
     p1 = int(float(get_setting("precio_primera", "1500") or 1500))
     currency = get_setting("currency", "DOP")
     bank = get_setting("bank_details", "")
-<p class="muted">
-  Promo: 5 proxies = <b>800</b> c/u • 10+ proxies = <b>700</b> c/u
-</p>
+
     body = f"""
     <div class="card">
       <div class="row">
@@ -2740,8 +2741,16 @@ def client_buy_page(client=Depends(require_client)):
         <a class="btn ghost" href="/bank">🏦 Ver cuenta</a>
       </div>
       <div class="hr"></div>
+
       <div class="kpi">🛒 Comprar proxy</div>
-      <p class="muted">Precio por proxy: <b>{p1} {html_escape(currency)}</b>. Crea tu pedido y sube el voucher.</p>
+
+      <p class="muted">
+        Precio base por proxy: <b>{p1} {html_escape(currency)}</b>
+      </p>
+
+      <p class="muted">
+        Promo: 5 proxies = <b>800</b> c/u • 10+ proxies = <b>700</b> c/u
+      </p>
     </div>
 
     <div class="grid">
@@ -2770,22 +2779,30 @@ def client_buy_page(client=Depends(require_client)):
 
 
 @app.post("/buy")
-def client_buy_submit(cantidad: str = Form("1"), email: str = Form(""), client=Depends(require_client)):
+def client_buy_submit(
+    cantidad: str = Form("1"),
+    email: str = Form(""),
+    client=Depends(require_client),
+):
     uid = int(client["uid"])
     email = (email or "").strip()
 
+    # qty
     try:
         qty = int(float((cantidad or "1").strip()))
-        if qty <= 0:
-            qty = 1
-        if qty > 50:
-            qty = 50
     except Exception:
         qty = 1
 
-       p1 = int(float(get_setting("precio_primera", "1500") or 1500))
+    if qty <= 0:
+        qty = 1
+    if qty > 50:
+        qty = 50
+
+    # precios
+    p1 = int(float(get_setting("precio_primera", "1500") or 1500))
     currency = get_setting("currency", "DOP")
 
+    # promo
     if qty >= 10:
         unit = 700
     elif qty >= 5:
@@ -2798,10 +2815,12 @@ def client_buy_submit(cantidad: str = Form("1"), email: str = Form(""), client=D
     def _do():
         conn = db_conn()
         cur = conn.cursor()
-                cur.execute(
-            "INSERT INTO accounts(phone,password_hash,recovery_pin_hash,verified,email,created_at,updated_at) "
-            "VALUES(?,?,?,?,?,?,?)",
-            (phone, pwd_hash, rec_hash, 0, email, now_str(), now_str()),
+
+        # ✅ Creamos pedido en requests (NO en accounts)
+        cur.execute(
+            "INSERT INTO requests(user_id,tipo,ip,cantidad,monto,estado,created_at,email,currency,target_proxy_id,note) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (uid, "buy", "-", qty, monto, "awaiting_voucher", now_str(), email, currency, 0, ""),
         )
         conn.commit()
         rid = cur.lastrowid
@@ -2809,7 +2828,9 @@ def client_buy_submit(cantidad: str = Form("1"), email: str = Form(""), client=D
         return rid
 
     rid = _retry_sqlite(_do)
-    notify_user(uid, f"🧾 Pedido #{rid} creado. Sube tu voucher para continuar.")
+    notify_user(uid, f"🧾 Pedido #{rid} creado por {qty} proxy(s). Sube tu voucher para continuar.")
+    admin_log("order_created_buy", json.dumps({"rid": rid, "uid": uid, "qty": qty, "monto": monto}, ensure_ascii=False))
+
     return RedirectResponse(url=f"/order/{int(rid)}/pay", status_code=302)
 
 
