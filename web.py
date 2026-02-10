@@ -1747,8 +1747,10 @@ def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(re
         conn = db_conn()
         cur = conn.cursor()
 
-        cur.execute("SELECT id, user_id, tipo, cantidad, target_proxy_id, note, email FROM requests WHERE id=?", (int(rid),))
-email = (req["email"] or "").strip()
+        cur.execute(
+            "SELECT id, user_id, tipo, cantidad, target_proxy_id, note FROM requests WHERE id=?",
+            (int(rid),),
+        )
         req = cur.fetchone()
         if not req:
             conn.close()
@@ -1766,12 +1768,9 @@ email = (req["email"] or "").strip()
                 conn.close()
                 raise HTTPException(400, "Stock insuficiente para aprobar esta compra.")
 
-            # ✅ NUEVO: si pegas proxies, se agregan al sistema
             if (delivery_raw or "").strip():
                 _deliver_buy_add_proxies(conn, uid, delivery_raw, qty, dias)
-            else:
-                # si no pegaste, se aprueba pero queda pendiente de entrega manual
-                pass
+            # si no pegaste proxies, igual aprobamos el pedido (queda pendiente entrega manual)
 
         elif tipo == "renew":
             if target_proxy_id <= 0:
@@ -1786,7 +1785,7 @@ email = (req["email"] or "").strip()
         conn.commit()
         conn.close()
 
-        # Notificaciones
+        # Notificaciones internas (panel)
         if tipo == "buy":
             if (delivery_raw or "").strip():
                 notify_user(uid, f"✅ Compra aprobada y entregada. Se agregaron {qty} proxies a tu cuenta.")
@@ -1803,6 +1802,7 @@ email = (req["email"] or "").strip()
 
     _retry_sqlite(_do)
     return RedirectResponse(url="/admin/orders", status_code=302)
+
 
 # ✅ Email al cliente si dejó Gmail
 if email:
