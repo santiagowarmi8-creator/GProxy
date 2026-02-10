@@ -1991,79 +1991,41 @@ def admin_ticket_reply(
 # =========================
 # CLIENT AUTH: SIGNUP / VERIFY / LOGIN / LOGOUT / RESET
 # =========================
-@app.post("/client/signup", response_class=HTMLResponse)
-def client_signup(
-    phone: str = Form(...),
-    password: str = Form(...),
-    recovery_pin: str = Form(...),
-    email: str = Form(""),
-):
-    phone = _normalize_phone(phone)
-    password = (password or "").strip()
-    recovery_pin = (recovery_pin or "").strip()
-    email = (email or "").strip()
+@app.get("/client/signup", response_class=HTMLResponse)
+def client_signup_page():
+    body = """
+    <div class="grid">
+      <div class="card">
+        <div class="kpi">Crear cuenta</div>
+        <p class="muted">Regístrate con Teléfono + Contraseña y define un PIN de recuperación.</p>
+      </div>
+      <div class="card">
+        <form method="post" action="/client/signup">
+          <label class="muted">Gmail (opcional)</label>
+          <input name="email" placeholder="tuemail@gmail.com"/>
+          <div style="height:12px;"></div>
 
-    if not phone or len(phone) < 8:
-        return nice_error_page("Datos inválidos", "Teléfono inválido.", "/client/signup", "↩️ Volver")
-    if not password or len(password) < 6:
-        return nice_error_page("Datos inválidos", "La contraseña debe tener mínimo 6 caracteres.", "/client/signup", "↩️ Volver")
-    if not recovery_pin.isdigit() or len(recovery_pin) < 4 or len(recovery_pin) > 6:
-        return nice_error_page("Datos inválidos", "El PIN de recuperación debe ser de 4 a 6 dígitos.", "/client/signup", "↩️ Volver")
+          <label class="muted">Teléfono</label>
+          <input name="phone" placeholder="+1809..."/>
+          <div style="height:12px;"></div>
 
-    def _do():
-        conn = db_conn()
-        cur = conn.cursor()
+          <label class="muted">Contraseña (mín 6)</label>
+          <input name="password" type="password" placeholder="••••••"/>
+          <div style="height:12px;"></div>
 
-        cur.execute("SELECT id FROM accounts WHERE phone=?", (phone,))
-        if cur.fetchone():
-            conn.close()
-            raise HTTPException(400, "Ese teléfono ya existe.")
+          <label class="muted">PIN de recuperación (4-6 dígitos)</label>
+          <input name="recovery_pin" placeholder="Ej: 1234"/>
+          <div style="height:12px;"></div>
 
-        pwd_hash = password_make_hash(password)
-        rec_hash = pin_hash(recovery_pin, PIN_SECRET)
-
-        # ✅ ahora guardamos email en accounts
-        cur.execute(
-            "INSERT INTO accounts(phone,email,password_hash,recovery_pin_hash,verified,created_at,updated_at) "
-            "VALUES(?,?,?,?,?,?,?)",
-            (phone, email, pwd_hash, rec_hash, 0, now_str(), now_str()),
-        )
-        conn.commit()
-
-        pin = _pin_gen(6)
-        exp = _time_plus_minutes(5)
-        cur.execute(
-            "INSERT INTO signup_pins(phone,pin_hash,expires_at,attempts,estado,created_at) VALUES(?,?,?,?,?,?)",
-            (phone, pin_hash(pin, PIN_SECRET), exp, 0, "pending", now_str()),
-        )
-        conn.commit()
-        conn.close()
-        return pin, exp
-
-    try:
-        pin, exp = _retry_sqlite(_do)
-    except HTTPException:
-        return nice_error_page("Cuenta existente", "Ese teléfono ya está registrado. Inicia sesión.", "/client/login", "🔐 Login")
-
-    body = f"""
-    <div class="card pinbox">
-      <div class="muted">Tu PIN de verificación (una sola vez)</div>
-      <div class="kpi" style="letter-spacing:6px;">{html_escape(pin)}</div>
-      <p class="muted">Expira: <b>{html_escape(exp)}</b></p>
-    </div>
-
-    <div class="card">
-      <form method="post" action="/client/verify">
-        <input type="hidden" name="phone" value="{html_escape(phone)}"/>
-        <label class="muted">PIN de verificación</label>
-        <input name="pin" placeholder="123456"/>
-        <div style="height:12px;"></div>
-        <button class="btn" type="submit">Verificar</button>
-        <a class="btn ghost" href="/" style="margin-left:10px;">🏠 Inicio</a>
-      </form>
+          <button class="btn" type="submit">Crear cuenta</button>
+          <a class="btn ghost" href="/client/login" style="margin-left:10px;">🔐 Login</a>
+        </form>
+        <div class="hr"></div>
+        <p class="muted">¿Olvidaste tu clave? <a href="/client/reset" style="color:white;">Resetear contraseña</a></p>
+      </div>
     </div>
     """
-    return page("Cliente • Verificación", body, subtitle="Confirmar cuenta")
+    return page("Cliente • Crear cuenta", body, subtitle="Registro seguro")
 
 @app.post("/client/verify", response_class=HTMLResponse)
 def client_verify(phone: str = Form(...), pin: str = Form(...)):
@@ -2180,32 +2142,6 @@ def client_login_page():
       </div>
     </div>
     """
-    # si falla, revisa si existe pero no verificada
-    def _check_unverified():
-        conn = db_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT verified FROM accounts WHERE phone=?", (_normalize_phone(phone),))
-        r = cur.fetchone()
-        conn.close()
-        return (int(r["verified"] or 0) == 0) if r else False
-
-    if not uid and _retry_sqlite(_check_unverified):
-        body = f"""
-        <div class="card">
-          <div class="kpi">Cuenta no verificada</div>
-          <p class="muted">Tu cuenta existe pero falta confirmar el PIN.</p>
-          <div class="hr"></div>
-
-          <form method="post" action="/client/resend_pin">
-            <input type="hidden" name="phone" value="{html_escape(_normalize_phone(phone))}"/>
-            <button class="btn" type="submit">📩 Reenviar PIN</button>
-            <a class="btn ghost" href="/client/signup" style="margin-left:10px;">✨ Crear de nuevo</a>
-          </form>
-        </div>
-        """
-        return HTMLResponse(page("Verificación", body, subtitle="Completa el PIN"))
-
-
     return page("Cliente • Login", body, subtitle="Acceso seguro")
 
 
@@ -2238,8 +2174,37 @@ def account_verify_login(phone: str, password: str) -> Optional[int]:
 
 @app.post("/client/login")
 def client_login(phone: str = Form(...), password: str = Form(...)):
+    # 1) intento de login normal (solo si verified=1)
     uid = account_verify_login(phone, password)
+
+    # 2) si no pudo loguear, verificar si existe pero NO verificada
     if not uid:
+        pnorm = _normalize_phone(phone)
+
+        def _check_unverified():
+            conn = db_conn()
+            cur = conn.cursor()
+            cur.execute("SELECT verified FROM accounts WHERE phone=?", (pnorm,))
+            r = cur.fetchone()
+            conn.close()
+            return (int(r["verified"] or 0) == 0) if r else False
+
+        if _retry_sqlite(_check_unverified):
+            body = f"""
+            <div class="card">
+              <div class="kpi">Cuenta no verificada</div>
+              <p class="muted">Tu cuenta existe pero falta confirmar el PIN.</p>
+              <div class="hr"></div>
+
+              <form method="post" action="/client/resend_pin">
+                <input type="hidden" name="phone" value="{html_escape(pnorm)}"/>
+                <button class="btn" type="submit">📩 Reenviar PIN</button>
+                <a class="btn ghost" href="/client/signup" style="margin-left:10px;">✨ Crear de nuevo</a>
+              </form>
+            </div>
+            """
+            return HTMLResponse(page("Verificación", body, subtitle="Completa el PIN"))
+
         return nice_error_page(
             "Login inválido",
             "Teléfono/contraseña incorrectos, cuenta no verificada o bloqueada.",
