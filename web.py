@@ -922,6 +922,16 @@ def home(request: Request):
 def health():
     return {"ok": True, "time": now_str(), "db": DB_PATH, "client_secret_loaded": bool(CLIENT_SECRET)}
 
+@app.get("/admin/debug/email")
+def debug_email(admin=Depends(require_admin)):
+    return {
+        "SMTP_HOST": SMTP_HOST,
+        "SMTP_PORT": SMTP_PORT,
+        "SMTP_USER_set": bool(SMTP_USER),
+        "SMTP_PASS_set": bool(SMTP_PASS),
+        "SMTP_FROM": SMTP_FROM,
+    }
+
 
 # =========================
 # ADMIN AUTH
