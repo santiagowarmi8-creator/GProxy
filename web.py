@@ -24,6 +24,34 @@ from fastapi import FastAPI, Depends, HTTPException, Request, Form, UploadFile, 
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+import smtplib
+from email.message import EmailMessage
+
+# ====== CONFIG EMAIL (PON TUS DATOS AQUÍ) ======
+SMTP_HOST = "smtp.gmail.com"
+SMTP_PORT = 587
+SMTP_USER = "santiaogwarmi8@gmail.com"      # <-- tu gmail
+SMTP_PASS = "rzch lrcg tyfi sopc" # <-- la app password (NO tu password normal)
+SMTP_FROM_NAME = "Gproxy"
+
+def send_email(to_email: str, subject: str, body: str) -> None:
+    to_email = (to_email or "").strip()
+    if not to_email:
+        return
+
+    msg = EmailMessage()
+    msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_USER}>"
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.set_content(body or "")
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as s:
+        s.ehlo()
+        s.starttls()
+        s.login(SMTP_USER, SMTP_PASS)
+        s.send_message(msg)
+
+
 
 # =========================
 # CONFIG
@@ -1534,12 +1562,15 @@ def admin_orders(admin=Depends(require_admin), state: str = ""):
             extra = f" • Proxy #{int(r['target_proxy_id'])}"
 
         deliver_box = ""
-        if tipo == "buy":
-            deliver_box = f"""
-              <div style="margin-top:8px;">
-                <label class="muted">Pega aquí {qty} proxies (RAW) — 1 por línea</label>
-                <textarea name="delivery_raw" placeholder="ip:port:user:pass&#10;ip:port:user:pass"></textarea>
-              </div>
+if tipo == "buy":
+    deliver_box = f"""
+      <div style="margin-top:8px;">
+        <label class="muted">Pega aquí {qty} proxies (RAW) — 1 por línea</label>
+        <textarea name="delivery_raw" placeholder="ip:port:user:pass&#10;ip:port:user:pass"></textarea>
+      </div>
+    """
+            """
+/div>
             """
 
         approve_form = f"""
@@ -1717,7 +1748,8 @@ def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(re
         conn = db_conn()
         cur = conn.cursor()
 
-        cur.execute("SELECT id, user_id, tipo, cantidad, target_proxy_id, note FROM requests WHERE id=?", (int(rid),))
+        cur.execute("SELECT id, user_id, tipo, cantidad, target_proxy_id, note, email FROM requests WHERE id=?", (int(rid),))
+email = (req["email"] or "").strip()
         req = cur.fetchone()
         if not req:
             conn.close()
@@ -1772,6 +1804,22 @@ def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(re
 
     _retry_sqlite(_do)
     return RedirectResponse(url="/admin/orders", status_code=302)
+
+# ✅ Email al cliente si dejó Gmail
+if email:
+    subject = f"Proxies entregadas (Pedido #{rid})"
+    body = (
+        f"Hola!\n\n"
+        f"Tu compra fue aprobada y tus proxies fueron entregadas.\n\n"
+        f"Pedido: #{rid}\n"
+        f"Cantidad: {qty}\n\n"
+        f"PROXIES:\n{delivery_raw.strip()}\n\n"
+        f"Gracias,\n{APP_TITLE}\n"
+    )
+    try:
+        send_email(email, subject, body)
+    except Exception:
+        pass
 
 
 @app.post("/admin/order/{rid}/reject")
