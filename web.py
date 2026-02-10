@@ -924,47 +924,63 @@ def debug_email(admin=Depends(require_admin)):
 
 
 # =========================
-# ADMIN AUTH
+# ADMIN AUTH (FIX: soporta /admin/login y /admin/login/)
 # =========================
-@app.get("/client/login", response_class=HTMLResponse)
-def client_login_page():
+@app.get("/admin/login", response_class=HTMLResponse)
+@app.get("/admin/login/", response_class=HTMLResponse)
+def admin_login_page():
     body = """
     <div class="grid">
       <div class="card">
-        <div class="kpi">Panel Cliente</div>
-        <p class="muted">Entra con tu Teléfono + Contraseña.</p>
+        <div class="kpi">Admin Access</div>
+        <p class="muted">Control total: usuarios, pedidos, soporte, ajustes y limpieza.</p>
       </div>
       <div class="card">
-        <form method="post" action="/client/login">
-          <label class="muted">Teléfono</label>
-          <input name="phone" placeholder="+1809..."/>
+        <form method="post" action="/admin/login">
+          <label class="muted">Clave Admin</label>
+          <input type="password" name="password" placeholder="Tu clave admin"/>
           <div style="height:12px;"></div>
-
-          <label class="muted">Contraseña</label>
-          <input name="password" type="password" placeholder="••••••"/>
-          <div style="height:12px;"></div>
-
           <button class="btn" type="submit">Entrar</button>
-          <a class="btn ghost" href="/client/signup" style="margin-left:10px;">✨ Crear cuenta</a>
+          <a class="btn ghost" href="/" style="margin-left:10px;">🏠 Inicio</a>
         </form>
-        <div class="hr"></div>
-        <p class="muted">¿Olvidaste tu clave? <a href="/client/reset" style="color:white;">Resetear contraseña</a></p>
       </div>
     </div>
     """
-    return page("Cliente • Login", body, subtitle="Acceso seguro")
+    return page("Admin Login", body, subtitle="Ingreso seguro")
+
 
 @app.post("/admin/login")
+@app.post("/admin/login/")
 def admin_login(password: str = Form(...)):
     if not ADMIN_PASSWORD:
         raise HTTPException(500, "Falta ADMIN_PASSWORD en variables.")
     if (password or "").strip() != ADMIN_PASSWORD:
-        return nice_error_page("Clave incorrecta", "La clave admin no es válida.", "/admin/login", "↩️ Intentar de nuevo")
+        return nice_error_page(
+            "Clave incorrecta",
+            "La clave admin no es válida.",
+            "/admin/login",
+            "↩️ Intentar de nuevo",
+        )
 
     token = sign({"role": "admin"}, JWT_SECRET, exp_seconds=8 * 3600)
     resp = RedirectResponse(url="/admin", status_code=302)
-    resp.set_cookie("admin_session", token, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE)
+    resp.set_cookie(
+        "admin_session",
+        token,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+    )
     return resp
+
+
+@app.get("/admin/logout")
+@app.get("/admin/logout/")
+def admin_logout():
+    resp = RedirectResponse(url="/", status_code=302)
+    resp.delete_cookie("admin_session")
+    return resp
+
 
 
 @app.get("/admin/logout")
