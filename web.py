@@ -782,9 +782,12 @@ def page(title: str, body: str, subtitle: str = "") -> str:
     th{{color:#f0eaff; font-weight:900}}
     pre,code{{background:rgba(0,0,0,.25); border:1px solid rgba(255,255,255,.10); border-radius:14px; padding:12px; overflow:auto}}
     pre{{white-space:pre-wrap; word-break:break-word}}
-table { display:block; overflow-x:auto; }
-td form { max-width: 520px; }
-textarea { max-width:100%; }
+
+    /* ✅ FIX: en f-strings hay que escapar llaves */
+    table {{ display:block; overflow-x:auto; }}
+    td form {{ max-width: 520px; }}
+    textarea {{ max-width:100%; }}
+
     .pill{{display:inline-flex; gap:8px; padding:8px 10px; border-radius:999px; border:1px solid rgba(255,255,255,.10); background:rgba(0,0,0,.18); font-size:12px}}
     .pinbox{{border:1px dashed rgba(255,255,255,.22); background:rgba(0,0,0,.18); border-radius:18px; padding:14px}}
     .badge{{display:inline-flex; align-items:center; justify-content:center; min-width:22px; height:22px; padding:0 8px; border-radius:999px; background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.14); font-size:12px; font-weight:900; color:white}}
@@ -809,12 +812,12 @@ textarea { max-width:100%; }
   <div class="wrap">
     <div class="topbar">
       <a href="/" class="brand" style="text-decoration:none; color:inherit;">
-  <div class="logo"><span>G</span></div>
-  <div>
-    <p class="title">GProxy</p>
-    <p class="subtitle">{st}</p>
-  </div>
-</a>
+        <div class="logo"><span>G</span></div>
+        <div>
+          <p class="title">GProxy</p>
+          <p class="subtitle">{st}</p>
+        </div>
+      </a>
       <div class="chip">🛡️ Proxies USA • Privadas • Estables</div>
     </div>
 
@@ -826,7 +829,6 @@ textarea { max-width:100%; }
   </div>
 </body>
 </html>"""
-
 
 def nice_error_page(title: str, msg: str, back_href: str = "/", back_label: str = "🏠 Inicio") -> HTMLResponse:
     body = f"""
