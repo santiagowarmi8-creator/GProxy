@@ -1549,9 +1549,11 @@ def admin_orders(admin=Depends(require_admin), state: str = ""):
     rows = _retry_sqlite(_do)
 
     trs = ""
+        trs = ""
     for r in rows:
         voucher = (r["voucher_path"] or "").strip()
         voucher_cell = f"<a href='/static/{html_escape(voucher)}' target='_blank'>ver</a>" if voucher else "-"
+
         rid = int(r["id"])
         uid = int(r["user_id"])
         tipo = (r["tipo"] or "").strip()
@@ -1562,15 +1564,12 @@ def admin_orders(admin=Depends(require_admin), state: str = ""):
             extra = f" • Proxy #{int(r['target_proxy_id'])}"
 
         deliver_box = ""
-if tipo == "buy":
-    deliver_box = f"""
-      <div style="margin-top:8px;">
-        <label class="muted">Pega aquí {qty} proxies (RAW) — 1 por línea</label>
-        <textarea name="delivery_raw" placeholder="ip:port:user:pass&#10;ip:port:user:pass"></textarea>
-      </div>
-    """
-            """
-/div>
+        if tipo == "buy":
+            deliver_box = f"""
+              <div style="margin-top:8px;">
+                <label class="muted">Pega aquí {qty} proxies (RAW) — 1 por línea</label>
+                <textarea name="delivery_raw" placeholder="ip:port:user:pass&#10;ip:port:user:pass"></textarea>
+              </div>
             """
 
         approve_form = f"""
@@ -1579,6 +1578,7 @@ if tipo == "buy":
             <button class="btn" type="submit" style="margin-top:8px;">✅ Aprobar</button>
           </form>
         """
+
         reject_form = f"""
           <form method="post" action="/admin/order/{rid}/reject" style="display:inline; margin-left:8px;">
             <button class="btn bad" type="submit">❌ Rechazar</button>
