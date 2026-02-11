@@ -627,6 +627,23 @@ def page(title: str, body: str, subtitle: str = "") -> str:
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>{t}</title>
+/* ===== FIX TABLAS MOBILE ===== */
+table {
+  display: block;
+  overflow-x: auto;
+  width: 100%;
+}
+
+th, td {
+  white-space: nowrap;
+}
+
+@media (max-width: 600px) {
+  th, td {
+    font-size: 12px;
+    padding: 10px;
+  }
+}
   <style>
     :root {{
       --bg1:#070019; --bg2:#14002e; --bg3:#24003f;
