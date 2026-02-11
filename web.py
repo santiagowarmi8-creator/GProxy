@@ -3041,6 +3041,117 @@ def admin_chat_room(user_id: int, admin=Depends(require_admin)):
     """
     return page("Admin • Chat", body, subtitle="Chat en vivo")
 
+@app.post("/client/signup", response_class=HTMLResponse)
+def client_signup_submit(
+    email: str = Form(""),
+    phone: str = Form(...),
+    password: str = Form(...),
+    recovery_pin: str = Form(...),
+):
+    # Normalizar inputs
+    email = (email or "").strip()
+    phone = _normalize_phone(phone)
+    password = (password or "").strip()
+    recovery_pin = (recovery_pin or "").strip()
+
+    if not phone:
+        return nice_error_page("Datos inválidos", "Teléfono inválido.", "/client/signup", "↩️ Volver")
+
+    if len(password) < 6:
+        return nice_error_page("Datos inválidos", "La contraseña debe tener mínimo 6 caracteres.", "/client/signup", "↩️ Volver")
+
+    if not recovery_pin.isdigit() or len(recovery_pin) < 4 or len(recovery_pin) > 6:
+        return nice_error_page("Datos inválidos", "El PIN de recuperación debe ser de 4 a 6 dígitos.", "/client/signup", "↩️ Volver")
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+
+        # Si ya existe la cuenta
+        cur.execute("SELECT id, verified FROM accounts WHERE phone=?", (phone,))
+        acc = cur.fetchone()
+
+        pwd_hash = password_make_hash(password)
+        rpin_hash = pin_hash(recovery_pin, PIN_SECRET)
+
+        if acc:
+            uid = int(acc["id"])
+            verified = int(acc["verified"] or 0)
+
+            if verified == 1:
+                conn.close()
+                return ("already_verified", "", "", 0)
+
+            # Si existe pero NO está verificada: la “revivimos” (actualiza datos)
+            cur.execute(
+                "UPDATE accounts SET email=?, password_hash=?, recovery_pin_hash=?, verified=0, updated_at=? WHERE id=?",
+                (email, pwd_hash, rpin_hash, now_str(), uid),
+            )
+        else:
+            # Crear nueva cuenta
+            cur.execute(
+                "INSERT INTO accounts(phone,email,password_hash,recovery_pin_hash,verified,is_blocked,last_seen,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (phone, email, pwd_hash, rpin_hash, 0, 0, "", now_str(), now_str()),
+            )
+            uid = int(cur.lastrowid)
+
+        # Crear PIN de verificación
+        pin = _pin_gen(6)
+        exp = _time_plus_minutes(5)
+        cur.execute(
+            "INSERT INTO signup_pins(phone,pin_hash,expires_at,attempts,estado,created_at) VALUES(?,?,?,?,?,?)",
+            (phone, pin_hash(pin, PIN_SECRET), exp, 0, "pending", now_str()),
+        )
+
+        conn.commit()
+        conn.close()
+        return ("ok", pin, exp, uid)
+
+    status, pin, exp, uid = _retry_sqlite(_do)
+
+    if status == "already_verified":
+        return nice_error_page(
+            "Cuenta ya existe",
+            "Este teléfono ya tiene una cuenta verificada. Inicia sesión.",
+            "/client/login",
+            "🔐 Login",
+        )
+
+    # Intentar mandar PIN por correo si puso email
+    if email:
+        try:
+            send_email(
+                email,
+                f"PIN de verificación • {APP_TITLE}",
+                f"Hola!\n\nTu PIN de verificación es: {pin}\nExpira: {exp}\n\nGracias,\n{APP_TITLE}\n",
+            )
+        except Exception:
+            pass
+
+    # Mostrar PIN + formulario para verificar (como tu resend_pin)
+    body = f"""
+    <div class="card pinbox">
+      <div class="muted">PIN de verificación</div>
+      <div class="kpi" style="letter-spacing:6px;">{html_escape(pin)}</div>
+      <p class="muted">Expira: <b>{html_escape(exp)}</b></p>
+      <p class="muted">Si pusiste Gmail, también lo enviamos por email (si tu SMTP está configurado).</p>
+    </div>
+
+    <div class="card">
+      <form method="post" action="/client/verify">
+        <input type="hidden" name="phone" value="{html_escape(phone)}"/>
+        <label class="muted">PIN</label>
+        <input name="pin" placeholder="123456"/>
+        <div style="height:12px;"></div>
+        <button class="btn" type="submit">✅ Verificar</button>
+        <a class="btn ghost" href="/client/login" style="margin-left:10px;">🔐 Login</a>
+      </form>
+    </div>
+    """
+    return page("Verificación", body, subtitle="Completa el PIN")
+
+
 
 @app.post("/admin/chat/{user_id}/send", response_class=HTMLResponse)
 def admin_chat_send(user_id: int, message: str = Form(...), admin=Depends(require_admin)):
