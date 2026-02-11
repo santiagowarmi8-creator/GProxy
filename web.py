@@ -627,6 +627,8 @@ def page(title: str, body: str, subtitle: str = "") -> str:
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>{t}</title>
+  <style>
+
 /* ===== FIX TABLAS MOBILE ===== */
 table {
   display: block;
@@ -644,7 +646,7 @@ th, td {
     padding: 10px;
   }
 }
-  <style>
+
     :root {{
       --bg1:#070019; --bg2:#14002e; --bg3:#24003f;
       --card: rgba(255,255,255,.06);
