@@ -3816,6 +3816,142 @@ def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(re
     _retry_sqlite(_do)
     return RedirectResponse(url="/admin/orders", status_code=302)
 
+# =========================
+# DELIVERY HELPERS (necesarios para aprobar pedidos)
+# =========================
+
+def _deliver_buy_only_count(qty: int) -> bool:
+    """
+    Si estás usando 'stock_available' en settings, valida y descuenta.
+    Si no te importa el stock, puedes retornar True siempre.
+    """
+    try:
+        stock = int(float(get_setting("stock_available", "0") or 0))
+    except Exception:
+        stock = 0
+
+    if stock < int(qty):
+        return False
+
+    set_setting("stock_available", str(stock - int(qty)))
+    return True
+
+
+def _deliver_buy_add_proxies(conn: sqlite3.Connection, user_id: int, raw_text: str, qty: int, dias: int):
+    """
+    Crea 'qty' proxies nuevas usando el texto pegado por el admin (RAW).
+    Acepta:
+      - 1 proxy por línea: ip:port:user:pass
+      - o bloques con 'HTTP' en una línea y la proxy en la siguiente.
+    """
+    ensure_proxies_schema()
+
+    lines = [ln.strip() for ln in (raw_text or "").splitlines()]
+    items = []
+    i = 0
+
+    while i < len(lines) and len(items) < qty:
+        ln = lines[i].strip()
+        if not ln:
+            i += 1
+            continue
+
+        up = ln.upper()
+        if up in ("HTTP", "HTTPS", "SOCKS5", "SOCKS4"):
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            if j >= len(lines):
+                break
+            proxy_line = lines[j].strip()
+            items.append(f"{up}\n{proxy_line}")
+            i = j + 1
+            continue
+
+        items.append(ln)
+        i += 1
+
+    if len(items) < qty:
+        raise HTTPException(400, f"Pegaste {len(items)} proxies pero el pedido es de {qty}.")
+
+    start = day_floor(datetime.now())
+    vdt = start + timedelta(days=int(dias))
+
+    cur = conn.cursor()
+    for raw in items[:qty]:
+        # La IP visible se saca de la última línea del RAW
+        last = raw.splitlines()[-1].strip()
+        ip = last.replace("http://", "").replace("https://", "").split()[0]
+
+        cur.execute(
+            "INSERT INTO proxies(user_id,ip,inicio,vence,estado,raw) VALUES(?,?,?,?,?,?)",
+            (int(user_id), ip, fmt_dt(start), fmt_dt(vdt), "active", raw),
+        )
+
+
+def _deliver_renew_extend(conn: sqlite3.Connection, user_id: int, proxy_id: int, dias: int):
+    """
+    Extiende 'vence' del proxy (renovación).
+    """
+    ensure_proxies_schema()
+
+    cur = conn.cursor()
+    cur.execute("SELECT id, vence FROM proxies WHERE id=? AND user_id=?", (int(proxy_id), int(user_id)))
+    p = cur.fetchone()
+    if not p:
+        raise HTTPException(400, "No encontré ese proxy para renovar.")
+
+    now = datetime.now()
+    v_old = parse_dt(p["vence"] or "") or now
+    base_dt = v_old if v_old > now else now
+    base = day_floor(base_dt)
+    v_new = base + timedelta(days=int(dias))
+
+    cur.execute("UPDATE proxies SET vence=? WHERE id=?", (fmt_dt(v_new), int(proxy_id)))
+
+
+def _deliver_claim_add_proxy(conn: sqlite3.Connection, user_id: int, note: str):
+    """
+    Aprobación de 'claim': agrega un proxy basado en note JSON (ip/raw/vence).
+    """
+    ensure_proxies_schema()
+
+    try:
+        payload = json.loads(note or "{}")
+    except Exception:
+        payload = {}
+
+    raw = (payload.get("raw") or "").strip()
+    ip = (payload.get("ip") or "").strip()
+    vence = (payload.get("vence") or "").strip()
+
+    if not raw and not ip:
+        raise HTTPException(400, "La solicitud no tiene proxy válido.")
+
+    if not ip and raw:
+        last = raw.splitlines()[-1].strip()
+        ip = last.replace("http://", "").replace("https://", "").split()[0]
+
+    start = day_floor(datetime.now())
+
+    dias_cfg = int(float(get_setting("dias_proxy", "30") or 30))
+    if dias_cfg <= 0:
+        dias_cfg = 30
+    if dias_cfg > 30:
+        dias_cfg = 30
+
+    if vence:
+        vdt = day_floor(parse_dt(vence) or (start + timedelta(days=dias_cfg)))
+    else:
+        vdt = start + timedelta(days=dias_cfg)
+
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO proxies(user_id,ip,inicio,vence,estado,raw) VALUES(?,?,?,?,?,?)",
+        (int(user_id), ip, fmt_dt(start), fmt_dt(vdt), "active", raw or ip),
+    )
+
+
 @app.post("/admin/order/{rid}/reject")
 def admin_order_reject(rid: int, admin=Depends(require_admin)):
     ensure_requests_schema()
