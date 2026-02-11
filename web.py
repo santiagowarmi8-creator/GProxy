@@ -3721,6 +3721,8 @@ def _parse_delivery_items_for_email(raw_text: str, qty: int) -> str:
 @app.post("/admin/order/{rid}/approve")
 def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(require_admin)):
     ensure_requests_schema()
+    ensure_requests_schema()
+    ensure_proxies_schema()
 
     def _do():
         conn = db_conn()
@@ -3870,6 +3872,57 @@ def admin_order_reject(rid: int, admin=Depends(require_admin)):
 
 def ensure_requests_schema():
     """
+
+def ensure_proxies_schema():
+    """
+    Asegura que exista la tabla proxies y columnas necesarias.
+    Evita error interno al aprobar pedidos.
+    """
+    def _do():
+        conn = db_conn()
+
+        _ensure_table(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS proxies(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                ip TEXT NOT NULL DEFAULT '',
+                inicio TEXT NOT NULL DEFAULT '',
+                vence TEXT NOT NULL DEFAULT '',
+                estado TEXT NOT NULL DEFAULT 'active',
+                raw TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+
+        for col, coldef in [
+            ("ip", "TEXT NOT NULL DEFAULT ''"),
+            ("inicio", "TEXT NOT NULL DEFAULT ''"),
+            ("vence", "TEXT NOT NULL DEFAULT ''"),
+            ("estado", "TEXT NOT NULL DEFAULT 'active'"),
+            ("raw", "TEXT NOT NULL DEFAULT ''"),
+        ]:
+            try:
+                _ensure_column(conn, "proxies", col, coldef)
+            except Exception:
+                pass
+
+        # Índices (mejoran velocidad en listados y entregas)
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_proxies_user_id ON proxies(user_id);")
+        except Exception:
+            pass
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_proxies_user_id_vence ON proxies(user_id, vence);")
+        except Exception:
+            pass
+
+        conn.commit()
+        conn.close()
+
+    _retry_sqlite(_do)
+
     Asegura que exista la tabla requests y columnas necesarias.
     Evita 500 si la DB está vieja o incompleta.
     """
