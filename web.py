@@ -628,25 +628,6 @@ def page(title: str, body: str, subtitle: str = "") -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>{t}</title>
   <style>
-
-/* ===== FIX TABLAS MOBILE ===== */
-table {
-  display: block;
-  overflow-x: auto;
-  width: 100%;
-}
-
-th, td {
-  white-space: nowrap;
-}
-
-@media (max-width: 600px) {
-  th, td {
-    font-size: 12px;
-    padding: 10px;
-  }
-}
-
     :root {{
       --bg1:#070019; --bg2:#14002e; --bg3:#24003f;
       --card: rgba(255,255,255,.06);
