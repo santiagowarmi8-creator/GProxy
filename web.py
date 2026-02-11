@@ -3872,57 +3872,6 @@ def admin_order_reject(rid: int, admin=Depends(require_admin)):
 
 def ensure_requests_schema():
     """
-
-def ensure_proxies_schema():
-    """
-    Asegura que exista la tabla proxies y columnas necesarias.
-    Evita error interno al aprobar pedidos.
-    """
-    def _do():
-        conn = db_conn()
-
-        _ensure_table(
-            conn,
-            """
-            CREATE TABLE IF NOT EXISTS proxies(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                ip TEXT NOT NULL DEFAULT '',
-                inicio TEXT NOT NULL DEFAULT '',
-                vence TEXT NOT NULL DEFAULT '',
-                estado TEXT NOT NULL DEFAULT 'active',
-                raw TEXT NOT NULL DEFAULT ''
-            );
-            """
-        )
-
-        for col, coldef in [
-            ("ip", "TEXT NOT NULL DEFAULT ''"),
-            ("inicio", "TEXT NOT NULL DEFAULT ''"),
-            ("vence", "TEXT NOT NULL DEFAULT ''"),
-            ("estado", "TEXT NOT NULL DEFAULT 'active'"),
-            ("raw", "TEXT NOT NULL DEFAULT ''"),
-        ]:
-            try:
-                _ensure_column(conn, "proxies", col, coldef)
-            except Exception:
-                pass
-
-        # Índices (mejoran velocidad en listados y entregas)
-        try:
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_proxies_user_id ON proxies(user_id);")
-        except Exception:
-            pass
-        try:
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_proxies_user_id_vence ON proxies(user_id, vence);")
-        except Exception:
-            pass
-
-        conn.commit()
-        conn.close()
-
-    _retry_sqlite(_do)
-
     Asegura que exista la tabla requests y columnas necesarias.
     Evita 500 si la DB está vieja o incompleta.
     """
@@ -3965,6 +3914,68 @@ def ensure_proxies_schema():
             except Exception:
                 pass
 
+        # Índices útiles
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_user_id ON requests(user_id);")
+        except Exception:
+            pass
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_estado ON requests(estado);")
+        except Exception:
+            pass
+
+        conn.commit()
+        conn.close()
+
+    _retry_sqlite(_do)
+
+
+def ensure_proxies_schema():
+    """
+    Asegura que exista la tabla proxies y columnas necesarias.
+    Evita error interno al aprobar pedidos o listar/renovar.
+    """
+    def _do():
+        conn = db_conn()
+
+        _ensure_table(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS proxies(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                ip TEXT NOT NULL DEFAULT '',
+                inicio TEXT NOT NULL DEFAULT '',
+                vence TEXT NOT NULL DEFAULT '',
+                estado TEXT NOT NULL DEFAULT 'active',
+                raw TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+
+        for col, coldef in [
+            ("ip", "TEXT NOT NULL DEFAULT ''"),
+            ("inicio", "TEXT NOT NULL DEFAULT ''"),
+            ("vence", "TEXT NOT NULL DEFAULT ''"),
+            ("estado", "TEXT NOT NULL DEFAULT 'active'"),
+            ("raw", "TEXT NOT NULL DEFAULT ''"),
+        ]:
+            try:
+                _ensure_column(conn, "proxies", col, coldef)
+            except Exception:
+                pass
+
+        # Índices (mejoran velocidad en listados)
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_proxies_user_id ON proxies(user_id);")
+        except Exception:
+            pass
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_proxies_user_id_vence ON proxies(user_id, vence);")
+        except Exception:
+            pass
+
+        conn.commit()
         conn.close()
 
     _retry_sqlite(_do)
@@ -4037,22 +4048,18 @@ def client_buy_submit(
     uid = int(client["uid"])
     email = (email or "").strip()
 
-    # qty
     try:
         qty = int(float((cantidad or "1").strip()))
     except Exception:
         qty = 1
-
     if qty <= 0:
         qty = 1
     if qty > 50:
         qty = 50
 
-    # precios
     p1 = int(float(get_setting("precio_primera", "1500") or 1500))
     currency = get_setting("currency", "DOP")
 
-    # promo
     if qty >= 10:
         unit = 700
     elif qty >= 5:
@@ -4086,6 +4093,7 @@ def client_buy_submit(
 @app.get("/renew/", response_class=HTMLResponse)
 def client_renew_page(client=Depends(require_client), proxy_id: str = ""):
     ensure_requests_schema()
+    ensure_proxies_schema()  # <-- importante para que exista proxies
 
     pr = int(float(get_setting("precio_renovacion", "1000") or 1000))
     currency = get_setting("currency", "DOP")
@@ -4160,6 +4168,7 @@ def client_renew_submit(
     client=Depends(require_client),
 ):
     ensure_requests_schema()
+    ensure_proxies_schema()  # <-- importante
 
     uid = int(client["uid"])
     email = (email or "").strip()
@@ -4338,6 +4347,7 @@ def client_order_voucher(rid: int, file: UploadFile = File(...), client=Depends(
 @app.post("/admin/order/{rid}/approve/")
 def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(require_admin)):
     ensure_requests_schema()
+    ensure_proxies_schema()
 
     def _do():
         conn = db_conn()
