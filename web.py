@@ -3864,6 +3864,525 @@ def admin_order_reject(rid: int, admin=Depends(require_admin)):
     _retry_sqlite(_do)
     return RedirectResponse(url="/admin/orders", status_code=302)
 
+# =========================
+# BUY / RENEW / PAY / VOUCHER  ✅ FULL BLOCK
+# =========================
+
+def ensure_requests_schema():
+    """
+    Asegura que exista la tabla requests y columnas necesarias.
+    Evita 500 si la DB está vieja o incompleta.
+    """
+    def _do():
+        conn = db_conn()
+
+        _ensure_table(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS requests(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                tipo TEXT NOT NULL DEFAULT '',
+                ip TEXT NOT NULL DEFAULT '-',
+                cantidad INTEGER NOT NULL DEFAULT 1,
+                monto INTEGER NOT NULL DEFAULT 0,
+                estado TEXT NOT NULL DEFAULT 'awaiting_voucher',
+                created_at TEXT NOT NULL DEFAULT '',
+                voucher_path TEXT NOT NULL DEFAULT '',
+                voucher_uploaded_at TEXT NOT NULL DEFAULT '',
+                email TEXT NOT NULL DEFAULT '',
+                currency TEXT NOT NULL DEFAULT 'DOP',
+                target_proxy_id INTEGER NOT NULL DEFAULT 0,
+                note TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+
+        # Migraciones seguras
+        for col, coldef in [
+            ("voucher_path", "TEXT NOT NULL DEFAULT ''"),
+            ("voucher_uploaded_at", "TEXT NOT NULL DEFAULT ''"),
+            ("email", "TEXT NOT NULL DEFAULT ''"),
+            ("currency", "TEXT NOT NULL DEFAULT 'DOP'"),
+            ("target_proxy_id", "INTEGER NOT NULL DEFAULT 0"),
+            ("note", "TEXT NOT NULL DEFAULT ''"),
+        ]:
+            try:
+                _ensure_column(conn, "requests", col, coldef)
+            except Exception:
+                pass
+
+        conn.close()
+
+    _retry_sqlite(_do)
+
+
+# ---------- BUY (GET) ----------
+@app.get("/buy", response_class=HTMLResponse)
+@app.get("/buy/", response_class=HTMLResponse)
+def client_buy_page(client=Depends(require_client)):
+    ensure_requests_schema()
+
+    p1 = int(float(get_setting("precio_primera", "1500") or 1500))
+    currency = get_setting("currency", "DOP")
+    bank = get_setting("bank_details", "")
+
+    body = f"""
+    <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/me">⬅️ Volver</a>
+        <a class="btn ghost" href="/bank">🏦 Ver cuenta</a>
+      </div>
+      <div class="hr"></div>
+
+      <div class="kpi">🛒 Comprar proxy</div>
+
+      <p class="muted">
+        Precio base por proxy: <b>{p1} {html_escape(currency)}</b>
+      </p>
+
+      <p class="muted">
+        Promo: 5 proxies = <b>800</b> c/u • 10+ proxies = <b>700</b> c/u
+      </p>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <form method="post" action="/buy">
+          <label class="muted">Cantidad</label>
+          <input name="cantidad" value="1"/>
+          <div style="height:12px;"></div>
+
+          <label class="muted">Gmail para factura (opcional)</label>
+          <input name="email" placeholder="tuemail@gmail.com"/>
+          <div style="height:12px;"></div>
+
+          <button class="btn" type="submit">✅ Crear pedido</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <div class="muted">Cuenta bancaria</div>
+        <pre>{html_escape(bank)}</pre>
+        <div class="muted">Luego sube tu voucher.</div>
+      </div>
+    </div>
+    """
+    return page("Comprar", body, subtitle="Pedido nuevo")
+
+
+# ---------- BUY (POST) ----------
+@app.post("/buy")
+@app.post("/buy/")
+def client_buy_submit(
+    cantidad: str = Form("1"),
+    email: str = Form(""),
+    client=Depends(require_client),
+):
+    ensure_requests_schema()
+
+    uid = int(client["uid"])
+    email = (email or "").strip()
+
+    # qty
+    try:
+        qty = int(float((cantidad or "1").strip()))
+    except Exception:
+        qty = 1
+
+    if qty <= 0:
+        qty = 1
+    if qty > 50:
+        qty = 50
+
+    # precios
+    p1 = int(float(get_setting("precio_primera", "1500") or 1500))
+    currency = get_setting("currency", "DOP")
+
+    # promo
+    if qty >= 10:
+        unit = 700
+    elif qty >= 5:
+        unit = 800
+    else:
+        unit = p1
+
+    monto = int(unit * qty)
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO requests(user_id,tipo,ip,cantidad,monto,estado,created_at,email,currency,target_proxy_id,note) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (uid, "buy", "-", qty, monto, "awaiting_voucher", now_str(), email, currency, 0, ""),
+        )
+        conn.commit()
+        rid = cur.lastrowid
+        conn.close()
+        return rid
+
+    rid = _retry_sqlite(_do)
+    notify_user(uid, f"🧾 Pedido #{rid} creado por {qty} proxy(s). Sube tu voucher para continuar.")
+    admin_log("order_created_buy", json.dumps({"rid": rid, "uid": uid, "qty": qty, "monto": monto}, ensure_ascii=False))
+    return RedirectResponse(url=f"/order/{int(rid)}/pay", status_code=302)
+
+
+# ---------- RENEW (GET) ----------
+@app.get("/renew", response_class=HTMLResponse)
+@app.get("/renew/", response_class=HTMLResponse)
+def client_renew_page(client=Depends(require_client), proxy_id: str = ""):
+    ensure_requests_schema()
+
+    pr = int(float(get_setting("precio_renovacion", "1000") or 1000))
+    currency = get_setting("currency", "DOP")
+    bank = get_setting("bank_details", "")
+    uid = int(client["uid"])
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        rows = []
+        try:
+            cur.execute("SELECT id, ip, vence FROM proxies WHERE user_id=? ORDER BY id DESC LIMIT 300", (uid,))
+            rows = cur.fetchall()
+        except Exception:
+            rows = []
+        conn.close()
+        return rows
+
+    rows = _retry_sqlite(_do)
+    opts = "<option value=''>Selecciona...</option>"
+    for r in rows:
+        sel = "selected" if proxy_id and str(r["id"]) == str(proxy_id) else ""
+        opts += f"<option value='{int(r['id'])}' {sel}>#{int(r['id'])} • {html_escape(r['ip'] or '')} • vence {html_escape(r['vence'] or '')}</option>"
+
+    body = f"""
+    <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/me">⬅️ Volver</a>
+        <a class="btn ghost" href="/bank">🏦 Ver cuenta</a>
+      </div>
+      <div class="hr"></div>
+      <div class="kpi">♻️ Renovar proxy</div>
+      <p class="muted">Renovación: <b>{pr} {html_escape(currency)}</b>. Luego sube el voucher.</p>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <form method="post" action="/renew">
+          <label class="muted">Proxy a renovar</label>
+          <select name="proxy_id">{opts}</select>
+          <div style="height:12px;"></div>
+
+          <label class="muted">Gmail para factura (opcional)</label>
+          <input name="email" placeholder="tuemail@gmail.com"/>
+          <div style="height:12px;"></div>
+
+          <label class="muted">Nota (opcional)</label>
+          <input name="note" placeholder="Opcional"/>
+          <div style="height:12px;"></div>
+
+          <button class="btn" type="submit">✅ Crear pedido</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <div class="muted">Cuenta bancaria</div>
+        <pre>{html_escape(bank)}</pre>
+        <div class="muted">Luego sube tu voucher.</div>
+      </div>
+    </div>
+    """
+    return page("Renovar", body, subtitle="Renovación")
+
+
+# ---------- RENEW (POST) ----------
+@app.post("/renew")
+@app.post("/renew/")
+def client_renew_submit(
+    proxy_id: str = Form(...),
+    email: str = Form(""),
+    note: str = Form(""),
+    client=Depends(require_client),
+):
+    ensure_requests_schema()
+
+    uid = int(client["uid"])
+    email = (email or "").strip()
+    note = (note or "").strip()
+
+    try:
+        pid = int(proxy_id)
+        if pid <= 0:
+            raise ValueError()
+    except Exception:
+        return nice_error_page("Dato inválido", "Selecciona un proxy válido.", "/renew", "↩️ Volver")
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT id, ip FROM proxies WHERE id=? AND user_id=?", (pid, uid))
+        p = cur.fetchone()
+        if not p:
+            conn.close()
+            raise HTTPException(400, "No encontré ese proxy en tu cuenta.")
+
+        pr = int(float(get_setting("precio_renovacion", "1000") or 1000))
+        currency = get_setting("currency", "DOP")
+        monto = int(pr)
+
+        cur.execute(
+            "INSERT INTO requests(user_id,tipo,ip,cantidad,monto,estado,created_at,email,currency,target_proxy_id,note) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (uid, "renew", p["ip"] or "-", 1, monto, "awaiting_voucher", now_str(), email, currency, pid, note),
+        )
+        conn.commit()
+        rid = cur.lastrowid
+        conn.close()
+        return rid
+
+    rid = _retry_sqlite(_do)
+    notify_user(uid, f"🧾 Pedido #{rid} (renovación) creado. Sube tu voucher para continuar.")
+    return RedirectResponse(url=f"/order/{int(rid)}/pay", status_code=302)
+
+
+# ---------- PAY PAGE ----------
+@app.get("/order/{rid}/pay", response_class=HTMLResponse)
+@app.get("/order/{rid}/pay/", response_class=HTMLResponse)
+def client_order_pay(rid: int, client=Depends(require_client)):
+    ensure_requests_schema()
+
+    uid = int(client["uid"])
+    bank = get_setting("bank_details", "")
+    title = get_setting("bank_title", "Cuenta bancaria")
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id,user_id,tipo,cantidad,monto,estado,created_at,voucher_path,email,currency,target_proxy_id "
+            "FROM requests WHERE id=?",
+            (int(rid),),
+        )
+        r = cur.fetchone()
+        conn.close()
+        return r
+
+    r = _retry_sqlite(_do)
+    if not r or int(r["user_id"]) != uid:
+        raise HTTPException(404, "Pedido no encontrado.")
+
+    voucher = (r["voucher_path"] or "").strip()
+    voucher_block = f"<p class='muted'>Voucher: <a href='/static/{html_escape(voucher)}' target='_blank'>ver</a></p>" if voucher else ""
+
+    extra = ""
+    if (r["tipo"] or "") == "renew" and int(r["target_proxy_id"] or 0) > 0:
+        extra = f"<p class='muted'>Proxy a renovar: <b>#{int(r['target_proxy_id'])}</b></p>"
+
+    body = f"""
+    <div class="card">
+      <div class="row">
+        <a class="btn ghost" href="/me">⬅️ Volver</a>
+      </div>
+      <div class="hr"></div>
+
+      <div class="kpi">💳 Pago del pedido #{int(r['id'])}</div>
+      <p class="muted">Tipo: <b>{html_escape(r['tipo'] or '')}</b> • Total: <b>{int(r['monto'])} {html_escape(r['currency'] or 'DOP')}</b></p>
+      {extra}
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="muted">{html_escape(title)}</div>
+        <pre>{html_escape(bank)}</pre>
+        <div class="hr"></div>
+        <div class="muted">Estado: <b>{html_escape(r['estado'] or '')}</b></div>
+        {voucher_block}
+      </div>
+
+      <div class="card">
+        <h3 style="margin:0 0 10px 0;">🧾 Subir voucher</h3>
+        <form method="post" action="/order/{int(r['id'])}/voucher" enctype="multipart/form-data">
+          <label class="muted">Imagen (jpg/png/webp)</label>
+          <input type="file" name="file" accept="image/*"/>
+          <div style="height:12px;"></div>
+          <button class="btn" type="submit">📤 Enviar voucher</button>
+        </form>
+        <p class="muted" style="margin-top:10px;">El admin revisará tu voucher.</p>
+      </div>
+    </div>
+    """
+    return page("Pago", body, subtitle="Sube comprobante")
+
+
+# ---------- UPLOAD VOUCHER ----------
+@app.post("/order/{rid}/voucher", response_class=HTMLResponse)
+@app.post("/order/{rid}/voucher/", response_class=HTMLResponse)
+def client_order_voucher(rid: int, file: UploadFile = File(...), client=Depends(require_client)):
+    ensure_requests_schema()
+
+    uid = int(client["uid"])
+
+    if not file or not file.filename:
+        return nice_error_page("Archivo inválido", "Debes subir una imagen.", f"/order/{rid}/pay", "↩️ Volver")
+
+    def _check_order():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT id,user_id,estado FROM requests WHERE id=?", (int(rid),))
+        r = cur.fetchone()
+        conn.close()
+        return r
+
+    r = _retry_sqlite(_check_order)
+    if not r or int(r["user_id"]) != uid:
+        raise HTTPException(404, "Pedido no encontrado.")
+
+    estado = (r["estado"] or "").strip()
+    if estado not in ("awaiting_voucher", "voucher_received"):
+        return nice_error_page("No permitido", f"Este pedido está en estado '{estado}' y no admite voucher.", f"/order/{rid}/pay", "↩️ Volver")
+
+    ext = os.path.splitext(file.filename)[1].lower().strip()
+    if ext not in [".jpg", ".jpeg", ".png", ".webp"]:
+        ext = ".jpg"
+
+    fname = f"rid{int(rid)}_u{uid}_{secrets.token_hex(8)}{ext}"
+    rel_path = os.path.join("vouchers", fname)
+    abs_path = os.path.join(UPLOAD_DIR, rel_path)
+    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+
+    data = file.file.read()
+    if not data or len(data) < 200:
+        return nice_error_page("Archivo inválido", "La imagen parece corrupta.", f"/order/{rid}/pay", "↩️ Volver")
+    if len(data) > 8 * 1024 * 1024:
+        return nice_error_page("Archivo grande", "Máximo 8MB.", f"/order/{rid}/pay", "↩️ Volver")
+
+    with open(abs_path, "wb") as f:
+        f.write(data)
+
+    def _update():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE requests SET voucher_path=?, voucher_uploaded_at=?, estado=? WHERE id=?",
+            (rel_path, now_str(), "voucher_received", int(rid)),
+        )
+        conn.commit()
+        conn.close()
+
+    _retry_sqlite(_update)
+    notify_user(uid, f"🧾 Voucher recibido para pedido #{rid}. En revisión.")
+    admin_log("voucher_uploaded", json.dumps({"rid": rid, "uid": uid, "path": rel_path}, ensure_ascii=False))
+    return nice_error_page("Voucher enviado", "Tu voucher fue subido correctamente.", f"/order/{rid}/pay", "🔎 Ver pedido")
+
+
+# =========================
+# ADMIN: APPROVE / REJECT (necesario para que /admin/orders apruebe)
+# =========================
+
+@app.post("/admin/order/{rid}/approve")
+@app.post("/admin/order/{rid}/approve/")
+def admin_order_approve(rid: int, delivery_raw: str = Form(""), admin=Depends(require_admin)):
+    ensure_requests_schema()
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT id,user_id,tipo,cantidad,estado,target_proxy_id,note,COALESCE(email,'') AS email "
+            "FROM requests WHERE id=?",
+            (int(rid),),
+        )
+        r = cur.fetchone()
+        if not r:
+            conn.close()
+            raise HTTPException(404, "Pedido no encontrado")
+
+        estado = (r["estado"] or "").strip()
+        if estado not in ("voucher_received", "awaiting_admin_verify", "awaiting_voucher"):
+            conn.close()
+            raise HTTPException(400, f"Este pedido está en estado '{estado}' y no se puede aprobar.")
+
+        uid = int(r["user_id"])
+        tipo = (r["tipo"] or "").strip()
+        qty = int(r["cantidad"] or 0)
+
+        dias = int(float(get_setting("dias_proxy", str(DEFAULT_DIAS_PROXY)) or DEFAULT_DIAS_PROXY))
+        if dias <= 0:
+            dias = DEFAULT_DIAS_PROXY
+        if dias > 30:
+            dias = 30
+
+        if tipo == "buy":
+            if not _deliver_buy_only_count(qty):
+                conn.close()
+                raise HTTPException(400, "No hay stock suficiente para este pedido.")
+            _deliver_buy_add_proxies(conn, uid, delivery_raw, qty, dias)
+
+        elif tipo == "renew":
+            pid = int(r["target_proxy_id"] or 0)
+            if pid <= 0:
+                conn.close()
+                raise HTTPException(400, "Pedido de renovación sin proxy_id.")
+            _deliver_renew_extend(conn, uid, pid, dias)
+
+        elif tipo == "claim":
+            _deliver_claim_add_proxy(conn, uid, r["note"] or "")
+
+        else:
+            conn.close()
+            raise HTTPException(400, f"Tipo desconocido: {tipo}")
+
+        cur.execute("UPDATE requests SET estado='approved' WHERE id=?", (int(rid),))
+        conn.commit()
+        conn.close()
+
+        notify_user(uid, f"✅ Tu pedido #{rid} fue aprobado.")
+        uemail = (r["email"] or "").strip()
+        if uemail:
+            try:
+                send_email(
+                    uemail,
+                    f"✅ Pedido #{rid} aprobado • {APP_TITLE}",
+                    f"Hola,\n\nTu pedido #{rid} fue aprobado.\n\nGracias,\n{APP_TITLE}\n",
+                )
+            except Exception:
+                pass
+
+        admin_log("order_approved", json.dumps({"rid": rid, "uid": uid, "tipo": tipo}, ensure_ascii=False))
+
+    _retry_sqlite(_do)
+    return RedirectResponse(url="/admin/orders", status_code=302)
+
+
+@app.post("/admin/order/{rid}/reject")
+@app.post("/admin/order/{rid}/reject/")
+def admin_order_reject(rid: int, admin=Depends(require_admin)):
+    ensure_requests_schema()
+
+    def _do():
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT id,user_id,estado FROM requests WHERE id=?", (int(rid),))
+        r = cur.fetchone()
+        if not r:
+            conn.close()
+            raise HTTPException(404, "Pedido no encontrado")
+
+        uid = int(r["user_id"])
+        cur.execute("UPDATE requests SET estado='rejected' WHERE id=?", (int(rid),))
+        conn.commit()
+        conn.close()
+
+        notify_user(uid, f"❌ Tu pedido #{rid} fue rechazado. Si necesitas ayuda, abre un ticket o usa el chat.")
+        admin_log("order_rejected", json.dumps({"rid": rid, "uid": uid}, ensure_ascii=False))
+
+    _retry_sqlite(_do)
+    return RedirectResponse(url="/admin/orders", status_code=302)
+
+
 
 # =========================
 # CLIENT: ADD EXISTING (CLAIM)
@@ -3934,6 +4453,8 @@ def client_add_existing_submit(ip: str = Form(""), raw: str = Form(""), vence: s
     notify_user(uid, f"📨 Solicitud #{rid} enviada. El admin la revisará.")
     admin_log("claim_proxy_request", json.dumps({"rid": rid, "uid": uid}, ensure_ascii=False))
     return nice_error_page("Solicitud enviada", f"Solicitud #{rid} enviada. El admin la revisará.", "/me", "⬅️ Volver al panel")
+
+
 
 
 # =========================
